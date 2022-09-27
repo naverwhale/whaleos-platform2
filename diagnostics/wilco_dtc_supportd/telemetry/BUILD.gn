@@ -1,0 +1,47 @@
+# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+
+pkg_config("libtelemetry_pkg_deps") {
+  pkg_deps = [ "libchrome" ]
+}
+
+source_set("libtelemetry") {
+  configs += [ ":libtelemetry_pkg_deps" ]
+  deps = [ "//diagnostics/common:libcommon" ]
+  sources = [
+    "bluetooth_event_service.cc",
+    "bluetooth_event_service_impl.cc",
+    "ec_service.cc",
+    "powerd_event_service_impl.cc",
+    "system_files_service.cc",
+    "system_files_service_impl.cc",
+    "system_info_service_impl.cc",
+  ]
+}
+
+if (use.test) {
+  source_set("telemetry_test") {
+    configs += [ ":libtelemetry_pkg_deps" ]
+    deps = [ "//diagnostics/common:libcommon_test_utils" ]
+    sources = [
+      "bluetooth_event_service_impl_test.cc",
+
+      # TODO: crbug.com/1100960
+      # Disabling the test as it is causing flaky compiler crash in CQ.
+      #"ec_service_test.cc",
+      "ec_service_test_utils.cc",
+      "ec_service_test_utils_test.cc",
+      "fake_bluetooth_event_service.cc",
+      "fake_ec_service.cc",
+      "fake_powerd_event_service.cc",
+      "mock_system_files_service.cc",
+      "mock_system_info_service.cc",
+      "powerd_event_service_impl_test.cc",
+      "system_files_service_impl_test.cc",
+      "system_info_service_impl_test.cc",
+    ]
+  }
+}

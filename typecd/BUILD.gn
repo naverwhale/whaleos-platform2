@@ -1,0 +1,92 @@
+# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/generate-dbus-adaptors.gni")
+import("//common-mk/pkg_config.gni")
+
+group("all") {
+  deps = [ ":typecd" ]
+  if (use.test) {
+    deps += [ ":typecd_testrunner" ]
+  }
+}
+
+pkg_config("target_defaults") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "libdebugd-client",
+    "libmetrics",
+    "libsession_manager-client",
+    "libudev",
+    "re2",
+  ]
+}
+
+executable("typecd") {
+  sources = [
+    "daemon.cc",
+    "main.cc",
+  ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":typecd_common" ]
+}
+
+generate_dbus_adaptors("typecd-adaptors") {
+  sources = [ "dbus_bindings/org.chromium.typecd.xml" ]
+  dbus_adaptors_out_dir = "include/typecd/dbus_adaptors"
+}
+
+static_library("typecd_common") {
+  sources = [
+    "alt_mode.cc",
+    "cable.cc",
+    "chrome_features_service_client.cc",
+    "cros_ec_util.cc",
+    "metrics.cc",
+    "notification_manager.cc",
+    "partner.cc",
+    "peripheral.cc",
+    "port.cc",
+    "port_manager.cc",
+    "session_manager_proxy.cc",
+    "udev_monitor.cc",
+    "utils.cc",
+  ]
+  all_dependent_configs = [ ":target_defaults" ]
+  deps = [ ":typecd-adaptors" ]
+}
+
+if (use.test) {
+  pkg_config("test_defaults") {
+    pkg_deps = [
+      "libbrillo-test",
+      "libchrome-test",
+      "libudev",
+      "re2",
+    ]
+  }
+
+  executable("typecd_testrunner") {
+    sources = [
+      "cable_test.cc",
+      "cros_ec_util_test.cc",
+      "metrics_test.cc",
+      "partner_test.cc",
+      "peripheral_test.cc",
+      "port_manager_test.cc",
+      "port_test.cc",
+      "test_utils.cc",
+      "udev_monitor_test.cc",
+    ]
+    configs += [
+      ":test_defaults",
+      "//common-mk:test",
+    ]
+    deps = [
+      ":typecd_common",
+      "//common-mk/testrunner:testrunner",
+    ]
+  }
+}

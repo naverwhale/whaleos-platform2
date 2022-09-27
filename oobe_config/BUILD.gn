@@ -1,0 +1,161 @@
+# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/generate-dbus-adaptors.gni")
+import("//common-mk/mojom_bindings_generator.gni")
+import("//common-mk/pkg_config.gni")
+import("//common-mk/proto_library.gni")
+
+group("all") {
+  deps = [
+    ":liboobeconfig",
+    ":librollback_helper",
+    ":oobe_config_restore",
+    ":oobe_config_save",
+    ":rollback_finish_restore",
+    ":rollback_prepare_save",
+  ]
+  if (use.test) {
+    deps += [ ":oobe_config_test" ]
+  }
+}
+
+pkg_config("target_defaults") {
+  defines = [ "USE_TPM2=${use.tpm2}" ]
+
+  # NOSORT
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "libmetrics",
+    "libmojo",
+
+    # system_api depends on protobuf (or protobuf-lite). It must
+    # appear before protobuf or the linker flags won't be in the right
+    # order.
+    "system_api",
+  ]
+  if (use.fuzzer) {
+    pkg_deps += [ "protobuf" ]
+  } else {
+    pkg_deps += [ "protobuf-lite" ]
+  }
+}
+
+generate_dbus_adaptors("oobe_config_restore_adaptors") {
+  dbus_adaptors_out_dir = "include/dbus_adaptors"
+  dbus_service_config = "dbus_bindings/dbus-service-config.json"
+  sources = [ "dbus_bindings/org.chromium.OobeConfigRestore.xml" ]
+}
+
+pkg_config("liboobeconfig_config") {
+  pkg_deps = [
+    "dbus-1",
+    "libpower_manager-client",
+    "openssl",
+  ]
+}
+
+# oobe_config library.
+static_library("liboobeconfig") {
+  sources = [
+    "load_oobe_config_rollback.cc",
+    "metrics.cc",
+    "network_exporter.cc",
+    "oobe_config.cc",
+    "pstore_storage.cc",
+    "rollback_constants.cc",
+    "rollback_openssl_encryption.cc",
+  ]
+  configs += [ ":liboobeconfig_config" ]
+  all_dependent_configs = [ ":target_defaults" ]
+  libs = [ "policy" ]
+  deps = [
+    ":librollback_helper_mojom",
+    ":oobe_config_proto",
+  ]
+}
+
+executable("oobe_config_save") {
+  sources = [ "oobe_config_save_main.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":liboobeconfig" ]
+}
+
+executable("oobe_config_restore") {
+  sources = [
+    "oobe_config_restore_main.cc",
+    "oobe_config_restore_service.cc",
+  ]
+  configs += [ ":target_defaults" ]
+  deps = [
+    ":liboobeconfig",
+    ":oobe_config_restore_adaptors",
+  ]
+}
+
+generate_mojom_bindings("librollback_helper_mojom") {
+  sources = [ "mojom/rollback_network_config.mojom" ]
+}
+
+# rollback_helper library.
+# Used by rollback_prepare_save and rollback_finish_restore.
+static_library("librollback_helper") {
+  sources = [
+    "rollback_constants.cc",
+    "rollback_helper.cc",
+  ]
+  configs += [ ":target_defaults" ]
+}
+
+# Helper running as root before oobe_config_save.
+executable("rollback_prepare_save") {
+  sources = [ "rollback_prepare_save_main.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [
+    ":liboobeconfig",
+    ":librollback_helper",
+  ]
+}
+
+# Helper running as root after oobe_config_restore.
+executable("rollback_finish_restore") {
+  sources = [ "rollback_finish_restore_main.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [
+    ":liboobeconfig",
+    ":librollback_helper",
+  ]
+}
+
+proto_library("oobe_config_proto") {
+  proto_in_dir = "."
+  proto_out_dir = "include/oobe_config"
+  sources = [ "rollback_data.proto" ]
+}
+
+if (use.test) {
+  pkg_config("test_config") {
+    pkg_deps = [ "libchrome-test" ]
+  }
+
+  executable("oobe_config_test") {
+    sources = [
+      "load_oobe_config_rollback_test.cc",
+      "oobe_config_test.cc",
+      "rollback_helper_test.cc",
+      "rollback_openssl_encryption_test.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":target_defaults",
+      ":test_config",
+    ]
+    deps = [
+      ":liboobeconfig",
+      ":librollback_helper",
+      "//common-mk/testrunner",
+    ]
+  }
+}

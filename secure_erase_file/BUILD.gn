@@ -1,0 +1,30 @@
+# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+
+group("all") {
+  deps = [
+    ":libsecure_erase_file",
+    ":secure_erase_file",
+  ]
+}
+
+pkg_config("target_defaults") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+  ]
+}
+
+shared_library("libsecure_erase_file") {
+  sources = [ "secure_erase_file.cc" ]
+  configs += [ ":target_defaults" ]
+}
+
+executable("secure_erase_file") {
+  sources = [ "secure_erase_file_main.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":libsecure_erase_file" ]
+}

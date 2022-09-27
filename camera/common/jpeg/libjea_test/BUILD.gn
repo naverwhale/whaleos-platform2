@@ -1,0 +1,21 @@
+# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+group("all") {
+  deps = [ ":libjea_test" ]
+}
+
+executable("libjea_test") {
+  sources = [ "//camera/common/jpeg/jpeg_encode_accelerator_test.cc" ]
+  configs += [
+    "//camera/build:cros_camera_common",
+    "//common-mk:test",
+  ]
+  pkg_deps = [
+    "libbrillo",
+    "libcros_camera",
+    "libcros_camera_android_deps",
+    "libyuv",
+  ]
+}

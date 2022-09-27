@@ -1,0 +1,94 @@
+# Copyright 2021 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+
+group("all") {
+  deps = [
+    ":libhwsec-foundation",
+    ":tpm_version_client",
+  ]
+  if (use.test) {
+    deps += [ ":hwsec-foundation_testrunner" ]
+  }
+}
+
+pkg_config("target_defaults") {
+  defines = [
+    "USE_TPM1=${use.tpm}",
+    "USE_TPM2=${use.tpm2}",
+    "USE_TPM_DYNAMIC=${use.tpm_dynamic}",
+  ]
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "openssl",
+    "re2",
+  ]
+}
+
+shared_library("libhwsec-foundation") {
+  sources = [
+    "da_reset/da_resetter.cc",
+    "syscaller/syscaller_impl.cc",
+    "tpm/tpm_version.cc",
+    "tpm_error/auth_failure_analysis.cc",
+    "tpm_error/handle_auth_failure.cc",
+    "tpm_error/tpm_error_data.cc",
+    "tpm_error/tpm_error_uma_reporter.cc",
+    "utility/crypto.cc",
+  ]
+  pkg_deps = [
+    "libmetrics",
+    "libtpm_manager-client",
+    "system_api",
+  ]
+  configs += [ ":target_defaults" ]
+  if (use.fuzzer && use.tpm) {
+    sources += [ "fuzzed_trousers_utils.cc" ]
+    configs += [ "//common-mk/common_fuzzer:common_fuzzer" ]
+  }
+}
+
+executable("tpm_version_client") {
+  sources = [ "tool/tpm_version_client.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":libhwsec-foundation" ]
+}
+
+if (use.test) {
+  pkg_config("test_config") {
+    pkg_deps = [
+      "libchrome-test",
+      "libmetrics",
+      "libtpm_manager-client",
+      "libtpm_manager-client-test",
+      "system_api",
+    ]
+  }
+
+  executable("hwsec-foundation_testrunner") {
+    sources = [
+      "da_reset/da_resetter_test.cc",
+      "error/error_test.cc",
+      "tpm_error/auth_failure_analysis_test.cc",
+      "tpm_error/handle_auth_failure_test.cc",
+      "tpm_error/tpm_error_uma_reporter_test.cc",
+      "utility/crypto_test.cc",
+    ]
+    sources += [
+      "tpm_error/tpm_error_data.cc",
+      "tpm_error/tpm_error_uma_reporter.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":target_defaults",
+      ":test_config",
+    ]
+    deps = [
+      ":libhwsec-foundation",
+      "//common-mk/testrunner",
+    ]
+  }
+}

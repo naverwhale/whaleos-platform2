@@ -1,0 +1,38 @@
+# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/mojom_bindings_generator.gni")
+
+group("all") {
+  deps = [ ":libiioservice_ipc" ]
+}
+
+generate_mojom_bindings("libiioservice_ipc_mojom") {
+  sources = [
+    "//iioservice/mojo/cros_sensor_service.mojom",
+    "//iioservice/mojo/sensor.mojom",
+  ]
+  mojo_root = "${platform2_root}"
+  use_pic = true
+  standalone = true
+}
+
+shared_library("libiioservice_ipc") {
+  output_name = "libiioservice_ipc"
+  sources = [
+    "//iioservice/libiioservice_ipc/sensor_client_dbus.cc",
+    "//iioservice/libiioservice_ipc/sensor_dbus.cc",
+    "//iioservice/libiioservice_ipc/sensor_server_dbus.cc",
+  ]
+  include_dirs = [
+    "//iioservice",
+    "//iioservice/include",
+    "//iioservice/libiioservice_ipc",
+  ]
+  pkg_deps = [
+    "libchrome",
+    "libmojo",
+  ]
+  deps = [ ":libiioservice_ipc_mojom" ]
+}

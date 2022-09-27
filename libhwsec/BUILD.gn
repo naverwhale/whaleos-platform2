@@ -1,0 +1,116 @@
+# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+
+group("all") {
+  deps = [ ":libhwsec" ]
+  deps += [ ":libhwsec_test" ]
+  if (use.test) {
+    deps += [ ":hwsec_testrunner" ]
+  }
+}
+
+pkg_config("target_defaults") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+  ]
+  defines = [
+    "USE_TPM_DYNAMIC=${use.tpm_dynamic}",
+    "USE_TPM1=${use.tpm}",
+    "USE_TPM2=${use.tpm2}",
+  ]
+}
+
+static_library("overalls_library") {
+  sources = [
+    "overalls/overalls_api.cc",
+    "overalls/overalls_singleton.cc",
+  ]
+  configs += [
+    ":target_defaults",
+    "//common-mk:pic",
+  ]
+}
+
+source_set("error_library") {
+  sources = [ "error/tpm_retry_handler.cc" ]
+  if (use.tpm2 || use.fuzzer) {
+    sources += [ "error/tpm2_error.cc" ]
+  }
+  if (use.tpm || use.fuzzer) {
+    sources += [ "error/tpm1_error.cc" ]
+  }
+  configs += [
+    ":target_defaults",
+    "//common-mk:pic",
+  ]
+}
+
+static_library("libhwsec_test") {
+  sources = []
+  if (use.tpm) {
+    sources += [ "test_utils/tpm1/test_fixture.cc" ]
+  }
+  configs += [
+    ":target_defaults",
+    "//common-mk:nouse_thin_archive",
+  ]
+  configs -= [ "//common-mk:use_thin_archive" ]
+}
+
+config("libhwsec_tpm1_config") {
+  libs = [ "tspi" ]
+}
+
+config("libhwsec_tpm2_config") {
+  libs = [ "trunks" ]
+}
+
+shared_library("libhwsec") {
+  configs += [ ":target_defaults" ]
+  all_dependent_configs = []
+  deps = [ ":error_library" ]
+  if (use.tpm2 || use.fuzzer) {
+    all_dependent_configs += [ ":libhwsec_tpm2_config" ]
+  }
+  if (use.tpm || use.fuzzer) {
+    all_dependent_configs += [ ":libhwsec_tpm1_config" ]
+    deps += [ ":overalls_library" ]
+  }
+}
+
+if (use.test) {
+  pkg_config("test_config") {
+    pkg_deps = [ "libchrome-test" ]
+  }
+
+  executable("hwsec_testrunner") {
+    sources = [
+      "error/tpm_error_test.cc",
+      "task_dispatching_framework_test.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":target_defaults",
+      ":test_config",
+    ]
+    deps = [
+      ":libhwsec",
+      ":libhwsec_test",
+      "//common-mk/testrunner",
+    ]
+    if (use.tpm) {
+      sources += [
+        "error/tpm1_error_test.cc",
+        "overalls/overalls_api_test.cc",
+        "overalls/overalls_singleton_test.cc",
+      ]
+    }
+    if (use.tpm2) {
+      sources += [ "error/tpm2_error_test.cc" ]
+    }
+  }
+}

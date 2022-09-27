@@ -1,0 +1,35 @@
+# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+
+# Library that provides utilities used by cros_healthd's root-level executor.
+pkg_config("libcros_healthd_executor_pkg_deps") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "libmojo",
+  ]
+}
+
+source_set("libcros_healthd_executor") {
+  configs += [ ":libcros_healthd_executor_pkg_deps" ]
+  deps = [
+    "//diagnostics/cros_healthd/process:libcros_healthd_process",
+    "//diagnostics/cros_healthd/utils:libcros_healthd_utils",
+    "//diagnostics/mojo:cros_healthd_executor_mojo_bindings",
+  ]
+  sources = [
+    "executor.cc",
+    "executor_adapter_impl.cc",
+    "executor_mojo_service.cc",
+  ]
+}
+
+if (use.test || use.fuzzer) {
+  source_set("libcros_healthd_executor_test_utils") {
+    deps = [ "//diagnostics/mojo:cros_healthd_executor_mojo_bindings" ]
+    sources = [ "mock_executor_adapter.cc" ]
+  }
+}

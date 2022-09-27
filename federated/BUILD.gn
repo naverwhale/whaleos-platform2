@@ -1,0 +1,105 @@
+# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/mojom_bindings_generator.gni")
+import("//common-mk/pkg_config.gni")
+import("//common-mk/proto_library.gni")
+
+group("all") {
+  deps = [ ":federated_service" ]
+  if (use.test) {
+    deps += [ ":federated_service_test" ]
+  }
+}
+
+pkg_config("federated_common_pkg_deps") {
+  pkg_deps = [
+    "absl",
+    "libbrillo",
+    "libchrome",
+    "libdlcservice-client",
+    "libmojo",
+    "libsession_manager-client",
+    "sqlite3",
+    "system_api",
+  ]
+}
+
+generate_mojom_bindings("federated_mojo_bindings") {
+  mojo_root = "${platform2_root}"
+  sources = [
+    "mojom/example.mojom",
+    "mojom/federated_service.mojom",
+  ]
+}
+
+proto_library("tf_example_proto") {
+  proto_in_dir = "./protos"
+  proto_out_dir = "federated/protos/"
+  sources = [
+    "${proto_in_dir}/example.proto",
+    "${proto_in_dir}/feature.proto",
+  ]
+}
+
+proto_library("cros_event_proto") {
+  proto_in_dir = "${sysroot}/usr/include/fcp"
+  proto_out_dir = "federated/protos/"
+  sources = [ "${proto_in_dir}/cros_events.proto" ]
+}
+
+static_library("federated_common") {
+  sources = [
+    "daemon.cc",
+    "device_status_monitor.cc",
+    "example_database.cc",
+    "federated_library.cc",
+    "federated_metadata.cc",
+    "federated_service_impl.cc",
+    "federated_session.cc",
+    "scheduler.cc",
+    "session_manager_proxy.cc",
+    "storage_manager.cc",
+    "utils.cc",
+  ]
+  all_dependent_configs = [ ":federated_common_pkg_deps" ]
+  pkg_deps = [ "protobuf" ]
+  deps = [
+    ":cros_event_proto",
+    ":federated_mojo_bindings",
+    ":tf_example_proto",
+  ]
+}
+
+executable("federated_service") {
+  sources = [ "main.cc" ]
+  deps = [ ":federated_common" ]
+}
+
+if (use.test) {
+  pkg_config("libchrome_test_config") {
+    pkg_deps = [
+      "libchrome-test",
+      "libsession_manager-client-test",
+    ]
+  }
+  executable("federated_service_test") {
+    sources = [
+      "device_status_monitor_test.cc",
+      "example_database_test.cc",
+      "federated_service_impl_test.cc",
+      "mock_example_database.cc",
+      "session_manager_proxy_test.cc",
+      "storage_manager_test.cc",
+      "test_utils.cc",
+      "testrunner.cc",
+      "utils_test.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":libchrome_test_config",
+    ]
+    deps = [ ":federated_common" ]
+  }
+}

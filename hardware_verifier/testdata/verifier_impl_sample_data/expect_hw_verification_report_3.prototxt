@@ -1,0 +1,8 @@
+is_compliant: false
+found_component_infos: {
+  component_category: storage
+  component_uuid: "storage_C"
+  qualification_status: UNQUALIFIED
+}
+generic_device_info: {
+}

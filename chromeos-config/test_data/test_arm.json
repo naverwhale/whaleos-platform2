@@ -1,0 +1,95 @@
+{
+  "chromeos": {
+    "configs": [
+      {
+        "firmware": {
+          "image-name": "some_unsigned"
+        },
+        "identity": {
+          "device-tree-compatible-match": "google,some"
+        },
+        "name": "some",
+        "ui": {
+          "help-content-id": "some",
+          "serialized-ash-switches": "--device-help-content-id=some\u0000"
+        },
+        "wallpaper": "some-wallpaper"
+      },
+      {
+        "firmware": {
+          "image-name": "whitelabel_signed"
+        },
+        "identity": {
+          "device-tree-compatible-match": "google,whitelabel",
+          "whitelabel-tag": "whitelabel1"
+        },
+        "name": "whitelabel",
+        "ui": {
+          "help-content-id": "whitelabel1",
+          "serialized-ash-switches": "--device-help-content-id=whitelabel1\u0000"
+        },
+        "wallpaper": "whitelabel1-wallpaper"
+      },
+      {
+        "firmware": {
+          "image-name": "whitelabel_signed"
+        },
+        "identity": {
+          "device-tree-compatible-match": "google,whitelabel",
+          "whitelabel-tag": "whitelabel2"
+        },
+        "name": "whitelabel",
+        "ui": {
+          "help-content-id": "whitelabel2",
+          "serialized-ash-switches": "--device-help-content-id=whitelabel2\u0000"
+        },
+        "wallpaper": "whitelabel2-wallpaper"
+      },
+      {
+        "firmware": {
+          "image-name": "whitelabel_signed"
+        },
+        "identity": {
+          "device-tree-compatible-match": "google,whitelabel",
+          "whitelabel-tag": ""
+        },
+        "name": "whitelabel",
+        "ui": {
+          "help-content-id": "whitelabel",
+          "serialized-ash-switches": "--device-help-content-id=whitelabel\u0000"
+        },
+        "wallpaper": "whitelabel-default-wallpaper"
+      },
+      {
+        "firmware": {
+          "image-name": "another1_firmware"
+        },
+        "identity": {
+          "device-tree-compatible-match": "google,another",
+          "platform-name": "Another",
+          "sku-id": 8
+        },
+        "name": "another1",
+        "ui": {
+          "help-content-id": "another1",
+          "serialized-ash-switches": "--device-help-content-id=another1\u0000"
+        }
+      },
+      {
+        "firmware": {
+          "image-name": "another2_firmware"
+        },
+        "identity": {
+          "device-tree-compatible-match": "google,another",
+          "platform-name": "Another",
+          "sku-id": 9
+        },
+        "name": "another2",
+        "ui": {
+          "help-content-id": "another2",
+          "serialized-ash-switches": "--device-help-content-id=another2\u0000"
+        }
+      }
+    ]
+  }
+}

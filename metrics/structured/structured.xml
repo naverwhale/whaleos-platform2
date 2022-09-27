@@ -1,0 +1,299 @@
+<!-- Structured metrics is under development and isn't available for use yet. -->
+
+<structured-metrics>
+
+<project name="Bluetooth">
+  <owner>yudiliu@chromium.org</owner>
+  <id>per-project</id>
+  <summary>
+    Project for recording bluetooth metrics.
+  </summary>
+
+  <event name="BluetoothAdapterStateChanged">
+    <summary>
+      Records the toggle of the adapter.
+    </summary>
+    <metric name="SystemTime" type="int">
+      <summary>
+        The system time in nanoseconds.
+      </summary>
+    </metric>
+    <metric name="AdapterState" type="int">
+      <summary>
+        The state of the bluetooth adapter, 0 for disabled and 1 for enabled.
+      </summary>
+    </metric>
+  </event>
+
+  <event name="BluetoothPairingStateChanged">
+    <summary>
+      Records the device pairing state change.
+    </summary>
+    <metric name="SystemTime" type="int">
+      <summary>
+        The system time in nanoseconds.
+      </summary>
+    </metric>
+    <metric name="DeviceId" type="hmac-string">
+      <summary>
+        The bluetooth device id.
+      </summary>
+    </metric>
+    <metric name="DeviceType" type="int">
+      <summary>
+        The bluetooth device type such as LE, BREDR.
+      </summary>
+    </metric>
+    <metric name="PairingState" type="int">
+      <summary>
+        The state of the pairing.
+      </summary>
+    </metric>
+  </event>
+
+  <event name="BluetoothAclConnectionStateChanged">
+    <summary>
+      Records the ACL connection state change.
+    </summary>
+    <metric name="SystemTime" type="int">
+      <summary>
+        The system time in nanoseconds.
+      </summary>
+    </metric>
+    <metric name="DeviceId" type="hmac-string">
+      <summary>
+        The bluetooth device id.
+      </summary>
+    </metric>
+    <metric name="DeviceType" type="int">
+      <summary>
+        The bluetooth device type such as LE, BREDR.
+      </summary>
+    </metric>
+    <metric name="ConnectionDirection" type="int">
+      <summary>
+        Whether it is an incoming or outgoing connection.
+      </summary>
+    </metric>
+    <metric name="StateChangeType" type="int">
+      <summary>
+        Whether it is a connection or disconnection state change.
+      </summary>
+    </metric>
+    <metric name="AclConnectionState" type="int">
+      <summary>
+        The state of the connection.
+      </summary>
+    </metric>
+  </event>
+
+  <event name="BluetoothProfileConnectionStateChanged">
+    <summary>
+      Records the profile connection state change.
+    </summary>
+    <metric name="SystemTime" type="int">
+      <summary>
+        The system time in nanoseconds.
+      </summary>
+    </metric>
+    <metric name="DeviceId" type="hmac-string">
+      <summary>
+        The bluetooth device id.
+      </summary>
+    </metric>
+    <metric name="StateChangeType" type="int">
+      <summary>
+        Whether it is a connection or disconnection state change.
+      </summary>
+    </metric>
+    <metric name="Profile" type="int">
+      <summary>
+        The bluetooth profile.
+      </summary>
+    </metric>
+    <metric name="ProfileConnectionState" type="int">
+      <summary>
+        The state of the profile connection.
+      </summary>
+    </metric>
+  </event>
+
+  <event name="BluetoothDeviceInfoReport">
+    <summary>
+      Records the bluetooth device info.
+    </summary>
+    <metric name="SystemTime" type="int">
+      <summary>
+        The system time in nanoseconds.
+      </summary>
+    </metric>
+    <metric name="DeviceId" type="hmac-string">
+      <summary>
+        The bluetooth device id.
+      </summary>
+    </metric>
+    <metric name="DeviceType" type="int">
+      <summary>
+        The bluetooth device type such as LE, BREDR.
+      </summary>
+    </metric>
+    <metric name="DeviceClass" type="int">
+      <summary>
+        The major class of the BR/EDR device.
+      </summary>
+    </metric>
+    <metric name="DeviceCategory" type="int">
+      <summary>
+        The category of the BLE device.
+      </summary>
+    </metric>
+    <metric name="VendorId" type="int">
+      <summary>
+        The vendor id of the bluetooth device.
+      </summary>
+    </metric>
+    <metric name="VendorIdSource" type="int">
+      <summary>
+        The vendor id source such as SIG and USB.
+      </summary>
+    </metric>
+    <metric name="ProductId" type="int">
+      <summary>
+        The product id of the bluetooth device.
+      </summary>
+    </metric>
+    <metric name="ProductVersion" type="int">
+      <summary>
+        The product version of the bluetooth device.
+      </summary>
+    </metric>
+  </event>
+
+</project>
+
+<project name="HardwareVerifier">
+  <owner>kevinptt@chromium.org</owner>
+  <id>per-project</id>
+  <summary>
+    Project for hardware_verifier to record HardwareVerifier metrics.
+    hardware_verifier is run once per boot.
+  </summary>
+
+  <event name="HwVerificationReport">
+    <summary>
+      Record a verification report once hardware_verifier runs.  The event will
+      be sent once per run.
+    </summary>
+    <metric name="IsCompliant" type="int">
+      <summary>
+        The qualification status of components that are probed by
+        hardware_verifier.
+      </summary>
+    </metric>
+    <metric name="QualificationStatusDisplayPanel" type="int">
+      <summary>The qualification status of display_panel components.</summary>
+    </metric>
+    <metric name="QualificationStatusStorage" type="int">
+      <summary>The qualification status of storage components.</summary>
+    </metric>
+  </event>
+  <event name="ComponentInfo">
+    <summary>
+      Record a hardware component on devices probed by hardware_verifier.
+      The event will be sent several times per run, depending on how many
+      hardware components are probed.  Since we only record display currently,
+      there are usually 1~2 events.  If we extend structured metrics to more
+      hardware categories, e.g. battery, memory, storage, network, it would be
+      about 10 events per run.
+    </summary>
+    <metric name="ComponentCategory" type="int">
+      <summary>The category of the recorded component.</summary>
+    </metric>
+    <metric name="DisplayPanelVendor" type="int">
+      <summary>The vendor of the display panel.</summary>
+    </metric>
+    <metric name="DisplayPanelProductId" type="int">
+      <summary>The product ID of the display panel.</summary>
+    </metric>
+    <metric name="DisplayPanelHeight" type="int">
+      <summary>The height of the display panel.</summary>
+    </metric>
+    <metric name="DisplayPanelWidth" type="int">
+      <summary>The width of the display panel.</summary>
+    </metric>
+    <metric name="StorageMmcManfid" type="int">
+      <summary>The manfid of the MMC storage.</summary>
+    </metric>
+    <metric name="StorageMmcHwrev" type="int">
+      <summary>The hwrev of the MMC storage.</summary>
+    </metric>
+    <metric name="StorageMmcOemid" type="int">
+      <summary>The oemid of the MMC storage.</summary>
+    </metric>
+    <metric name="StorageMmcPrv" type="int">
+      <summary>The prv of the MMC storage.</summary>
+    </metric>
+    <metric name="StoragePciVendor" type="int">
+      <summary>The vendor of the PCI (NVMe) storage.</summary>
+    </metric>
+    <metric name="StoragePciDevice" type="int">
+      <summary>The device ID of the PCI (NVMe) storage.</summary>
+    </metric>
+    <metric name="StoragePciClass" type="int">
+      <summary>The device class of the PCI (NVMe) storage.</summary>
+    </metric>
+  </event>
+</project>
+
+<project name="TestProjectOne">
+  <owner>tby@chromium.org</owner>
+  <id>none</id>
+  <summary>
+    Project for unit testing, do not use.
+  </summary>
+  <event name="TestEventOne">
+    <summary>
+      Event for unit testing, do not use.
+    </summary>
+    <metric name="TestMetricOne" type="hmac-string">
+      <summary>
+        A per-user keyed hashed value.
+      </summary>
+    </metric>
+    <metric name="TestMetricTwo" type="int">
+      <summary>
+        An unhashed value, recorded as-is.
+      </summary>
+    </metric>
+  </event>
+  <event name="TestEventTwo">
+    <summary>
+      Event for unit testing, do not use.
+    </summary>
+    <metric name="TestMetricThree" type="int">
+      <summary>
+        A per-user keyed hashed value.
+      </summary>
+    </metric>
+  </event>
+</project>
+
+<project name="TestProjectTwo">
+  <owner>tby@chromium.org</owner>
+  <id>none</id>
+  <summary>
+    Project for unit testing, do not use.
+  </summary>
+  <event name="TestEventThree">
+    <summary>
+      Event for unit testing, do not use.
+    </summary>
+    <metric name="TestMetricFour" type="hmac-string">
+      <summary>
+        A per-user keyed hashed value.
+      </summary>
+    </metric>
+  </event>
+</project>
+
+</structured-metrics>

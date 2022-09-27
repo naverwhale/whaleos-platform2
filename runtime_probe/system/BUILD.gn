@@ -1,0 +1,50 @@
+# Copyright 2021 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+
+pkg_config("libsystem_common_pkg_deps") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "libdebugd-client",
+  ]
+  defines = [ "USE_FACTORY_RUNTIME_PROBE=${use.factory_runtime_probe}" ]
+}
+
+source_set("libsystem") {
+  configs += [ ":libsystem_common_pkg_deps" ]
+  sources = [
+    "context_impl.cc",
+    "context_instance.cc",
+  ]
+  if (use.factory_runtime_probe) {
+    sources += [
+      "context_factory_impl.cc",
+      "helper_invoker_direct_impl.cc",
+    ]
+  } else {
+    sources += [
+      "context_runtime_impl.cc",
+      "helper_invoker_debugd_impl.cc",
+    ]
+  }
+}
+
+if (use.test) {
+  pkg_config("libsystem_test_pkg_deps") {
+    pkg_deps = [
+      "libdebugd-client",
+      "libdebugd-client-test",
+    ]
+  }
+
+  source_set("libsystem_test") {
+    configs += [
+      ":libsystem_common_pkg_deps",
+      ":libsystem_test_pkg_deps",
+    ]
+    sources = [ "fake_helper_invoker.cc" ]
+  }
+}

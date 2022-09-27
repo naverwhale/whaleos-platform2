@@ -1,0 +1,26 @@
+# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+
+group("all") {
+  deps = [ ":printer_diag" ]
+}
+
+pkg_config("target_defaults") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "libipp",
+  ]
+}
+
+executable("printer_diag") {
+  sources = [
+    "ipp_in_json.cc",
+    "ipp_in_json.h",
+    "printer_diag.cc",
+  ]
+  configs += [ ":target_defaults" ]
+}

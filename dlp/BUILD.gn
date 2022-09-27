@@ -1,0 +1,102 @@
+# Copyright 2021 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/generate-dbus-adaptors.gni")
+import("//common-mk/generate-dbus-proxies.gni")
+import("//common-mk/pkg_config.gni")
+import("//common-mk/proto_library.gni")
+
+group("all") {
+  deps = [
+    ":dbus_adaptors_generator",
+    ":dbus_proxies_generator",
+    ":dlp",
+  ]
+  if (use.test) {
+    deps += [ ":dlp_test" ]
+  }
+}
+
+# D-Bus adaptors code generator.
+generate_dbus_adaptors("dbus_adaptors_generator") {
+  dbus_service_config = "dbus_bindings/dbus-service-config.json"
+  dbus_adaptors_out_dir = "include/dlp"
+  sources = [ "dbus_bindings/org.chromium.Dlp.xml" ]
+}
+
+# D-Bus proxies code generator
+generate_dbus_proxies("dbus_proxies_generator") {
+  mock_output_file = "include/dlp/dbus-proxy-mocks.h"
+  proxy_output_file = "include/dlp/dbus-proxies.h"
+  sources = [ "dbus_bindings/org.chromium.DlpFilesPolicyService.xml" ]
+}
+
+pkg_config("target_defaults") {
+  # NOSORT
+  pkg_deps = [
+    "dbus-1",
+    "libbrillo",
+    "libchrome",
+    "libsession_manager-client",
+
+    # system_api depends on protobuf (or protobuf-lite). It must
+    # appear before protobuf or the linker flags won't be in the right
+    # order.
+    "system_api",
+    "protobuf-lite",
+  ]
+
+  libs = [ "leveldb" ]
+}
+
+static_library("libdlp_static") {
+  sources = [
+    "dlp_adaptor.cc",
+    "dlp_daemon.cc",
+    "fanotify_reader_thread.cc",
+    "fanotify_watcher.cc",
+  ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":dlp_proto" ]
+}
+
+executable("dlp") {
+  sources = [ "dlp.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":libdlp_static" ]
+}
+
+proto_library("dlp_proto") {
+  proto_in_dir = "./proto"
+  proto_out_dir = "include/dlp"
+  sources = [ "${proto_in_dir}/database.proto" ]
+}
+
+# Unit tests.
+if (use.test) {
+  pkg_config("dlp_test_config") {
+    pkg_deps = [
+      "libchrome",
+      "libchrome-test",
+    ]
+  }
+  executable("dlp_test") {
+    sources = [
+      "dlp_adaptor_test.cc",
+      # TODO(crbug.com/1223082) Rewrite fanotify_watcher tests to use mocked
+      # fanotify as they are flaky otherwise.
+      # "fanotify_watcher_test.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":dlp_test_config",
+      ":target_defaults",
+    ]
+    defines = [ "UNIT_TEST" ]
+    deps = [
+      ":libdlp_static",
+      "//common-mk/testrunner:testrunner",
+    ]
+  }
+}

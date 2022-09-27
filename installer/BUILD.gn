@@ -1,0 +1,109 @@
+# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+
+group("all") {
+  deps = [ ":cros_installer" ]
+  if (!use.cros_host) {
+    deps += [ ":evwaitkey" ]
+  }
+  if (use.mtd) {
+    deps += [ ":nand_partition" ]
+  }
+  if (use.test) {
+    deps += [ ":cros_installer_test" ]
+  }
+}
+
+pkg_config("target_defaults") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "libdm-bht",
+    "vboot_host",
+  ]
+}
+
+static_library("libcros_installer") {
+  sources = [
+    "cgpt_manager.cc",
+    "chromeos_install_config.cc",
+    "chromeos_legacy.cc",
+    "chromeos_postinst.cc",
+    "chromeos_setimage.cc",
+    "chromeos_verity.cc",
+    "inst_util.cc",
+  ]
+  if (use.enable_slow_boot_notify) {
+    sources += [ "slow_boot_notify_enable.cc" ]
+  } else {
+    sources += [ "slow_boot_notify_stub.cc" ]
+  }
+  configs += [ ":target_defaults" ]
+}
+
+pkg_config("cros_installer_config") {
+  pkg_deps = [ "libchrome" ]
+}
+
+executable("cros_installer") {
+  sources = [ "cros_installer_main.cc" ]
+  configs += [
+    ":cros_installer_config",
+    ":target_defaults",
+  ]
+  deps = [ ":libcros_installer" ]
+}
+
+executable("evwaitkey") {
+  sources = [ "util/evwaitkey.c" ]
+  configs += [ ":target_defaults" ]
+}
+
+if (use.mtd) {
+  pkg_config("nand_partition_config") {
+    pkg_deps = [ "libchrome" ]
+  }
+  executable("nand_partition") {
+    sources = [
+      "nand_partition.cc",
+      "nand_partition_main.cc",
+    ]
+    configs += [
+      ":nand_partition_config",
+      ":target_defaults",
+    ]
+    deps = [ ":libcros_installer" ]
+  }
+}
+
+if (!use.cros_host && use.test) {
+  pkg_config("cros_installer_test_config") {
+    pkg_deps = [
+      "libchrome",
+      "libchrome-test",
+    ]
+  }
+
+  executable("cros_installer_test") {
+    sources = [
+      "chromeos_install_config_test.cc",
+      "chromeos_legacy_test.cc",
+      "inst_util_test.cc",
+    ]
+    if (use.enable_slow_boot_notify) {
+      sources += [ "slow_boot_notify_test.cc" ]
+    }
+    configs += [
+      "//common-mk:test",
+      ":cros_installer_test_config",
+      ":target_defaults",
+    ]
+    deps = [
+      ":libcros_installer",
+      "//common-mk/testrunner:testrunner",
+    ]
+  }
+}

@@ -1,0 +1,69 @@
+// Copyright 2017 The Chromium OS Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+module cros.mojom;
+
+// This is mojo interface that wraps camera_algorithm_ops_t functions
+
+interface CameraAlgorithmOps {
+  // This method is one-time initialization that registers a callback function
+  // for the camera algorithm library to return a buffer handle. It must be
+  // called before any other functions.
+  //
+  // Args:
+  //    |callbacks|: Callback interface.
+  //
+  // Returns:
+  //    0 on success; corresponding error code on failure.
+  Initialize(pending_remote<CameraAlgorithmCallbackOps> callbacks)
+      => (int32 result);
+
+  // This method registers a buffer to the camera algorithm library and gets
+  // the handle associated with it.
+  //
+  // Args:
+  //    |buffer_fd|: The buffer file descriptor to register.
+  //
+  // Returns:
+  //    A handle on success; corresponding error code on failure.
+  RegisterBuffer(handle buffer_fd) => (int32 result);
+
+  // This method posts a request for the camera algorithm library to process the
+  // given buffer. This method is asynchronous and returns immediately after the
+  // bridge sends the IPC message out.
+  //
+  // Args:
+  //    |req_id|: The ID that uniquely identifies this request and needs to be
+  //      sent back in camera_algorithm_callback_ops_t.return_callback().
+  //    |req_header|: The request header indicating request details. The
+  //      interpretation depends on the HAL implementation.
+  //    |buffer_handle|: Handle of the buffer to process.
+  Request(uint32 req_id, array<uint8> req_header, int32 buffer_handle);
+
+  // This method deregisters buffers to the camera algorithm library. The camera
+  // algorithm shall release all the registered buffers on return of this
+  // function.
+  //
+  // Args:
+  //    |buffer_handles|: The buffer handles to deregister.
+  //
+  // Returns:
+  //    A handle on success; -1 on failure.
+  DeregisterBuffers(array<int32> buffer_handles);
+};
+
+// This is mojo interface that wraps camera_algorithm_callback_ops_t functions
+
+interface CameraAlgorithmCallbackOps {
+  // This method returns a buffer that the camera algorithm library has
+  // completed the corresponding request.
+  //
+  // Args:
+  //    |req_id|: The ID that uniquely identifies this request and needs to be
+  //      sent back in camera_algorithm_callback_ops_t.return_callback().
+  //    |status|: Status of the corresponding request. The interpretation
+  //      depends on the HAL implementation.
+  //    |buffer_handle|: Handle of the buffer to return.
+  Return(uint32 req_id, uint32 status, int32 buffer_handle);
+};

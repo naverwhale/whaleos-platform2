@@ -1,0 +1,5 @@
+include chromium/src:main:/components/arc/session/OWNERS
+# Native bridge / binary translation setup
+levarum@chromium.org
+# Additional backup reviewers
+linben@chromium.org

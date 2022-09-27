@@ -1,0 +1,113 @@
+# Copyright 2021 The Chromium OS Authors.All rights reserved.
+# Use of this source code is governed by a BSD - style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+import("//common-mk/proto_library.gni")
+
+pkg_config("target_defaults") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+  ]
+
+  if (use.fuzzer) {
+    pkg_deps += [ "protobuf" ]
+  } else {
+    pkg_deps += [ "protobuf-lite" ]
+  }
+}
+
+static_library("storage_configuration") {
+  sources = [ "storage_configuration.cc" ]
+  configs += [ ":target_defaults" ]
+}
+
+static_library("storage_uploader_interface") {
+  sources = [ "storage_uploader_interface.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [
+    "//missive/proto:record_constants",
+    "//missive/proto:record_proto",
+    "//missive/proto:status_proto",
+    "//missive/util:status",
+  ]
+}
+
+static_library("storage_queue") {
+  sources = [ "storage_queue.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [
+    ":storage_configuration",
+    ":storage_uploader_interface",
+    "//missive/compression:compression_module",
+    "//missive/encryption:encryption_module_interface",
+    "//missive/encryption:verification",
+    "//missive/proto:record_constants",
+    "//missive/proto:record_proto",
+    "//missive/storage/resources:resource_interface",
+    "//missive/util:status",
+    "//missive/util:status_macros",
+    "//missive/util:task_runner_context",
+  ]
+}
+
+static_library("storage_module") {
+  sources = [ "storage_module.cc" ]
+  configs += [ ":target_defaults" ]
+  public_deps = [ ":storage_configuration" ]
+  deps = [
+    ":storage",
+    ":storage_module_interface",
+    ":storage_uploader_interface",
+    "//missive/encryption:encryption_module",
+    "//missive/encryption:encryption_module_interface",
+    "//missive/proto:record_constants",
+    "//missive/proto:record_proto",
+    "//missive/util:status",
+  ]
+}
+
+static_library("storage") {
+  sources = [ "storage.cc" ]
+  configs += [ ":target_defaults" ]
+  public_deps = [ ":storage_configuration" ]
+  deps = [
+    ":storage_queue",
+    ":storage_uploader_interface",
+    "//missive/compression:compression_module",
+    "//missive/encryption:encryption_module",
+    "//missive/encryption:encryption_module_interface",
+    "//missive/encryption:verification",
+    "//missive/proto:record_constants",
+    "//missive/proto:record_proto",
+    "//missive/util:status",
+    "//missive/util:status_macros",
+    "//missive/util:task_runner_context",
+  ]
+}
+
+static_library("storage_module_interface") {
+  sources = [ "storage_module_interface.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [
+    "//missive/compression:compression_module",
+    "//missive/proto:record_constants",
+    "//missive/proto:record_proto",
+    "//missive/util:status",
+  ]
+}
+
+static_library("storage_test_support") {
+  sources = [ "test_storage_module.cc" ]
+  configs += [ ":target_defaults" ]
+  public_deps = [
+    ":storage",
+    ":storage_configuration",
+    ":storage_module",
+    ":storage_queue",
+    "//missive/proto:record_constants",
+    "//missive/proto:record_proto",
+    "//missive/util:status",
+  ]
+}

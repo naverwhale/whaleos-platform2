@@ -1,0 +1,113 @@
+# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/generate-dbus-adaptors.gni")
+import("//common-mk/generate-dbus-proxies.gni")
+import("//common-mk/pkg_config.gni")
+
+group("all") {
+  deps = [
+    ":lorgnette",
+    ":lorgnette_cli",
+  ]
+  if (use.test) {
+    deps += [ ":lorgnette_unittest" ]
+  }
+}
+
+pkg_config("target_defaults_deps") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "libjpeg",
+    "libmetrics",
+    "libpng",
+    "libusb-1.0",
+    "protobuf-lite",
+    "re2",
+    "sane-backends",
+    "system_api",
+    "uuid",
+  ]
+}
+
+config("target_defaults") {
+  cflags_c = [ "-Wextra" ]
+  cflags_cc = [
+    "-Woverloaded-virtual",
+    "-Wconditional-uninitialized",
+  ]
+  configs = [ ":target_defaults_deps" ]
+}
+
+generate_dbus_adaptors("lorgnette-adaptors") {
+  sources = [ "dbus_bindings/org.chromium.lorgnette.Manager.xml" ]
+  dbus_adaptors_out_dir = "include/lorgnette/dbus_adaptors"
+}
+
+generate_dbus_proxies("lorgnette-proxies") {
+  sources = [ "dbus_bindings/org.chromium.lorgnette.Manager.xml" ]
+  proxy_output_file = "include/lorgnette/dbus-proxies.h"
+}
+
+pkg_config("liblorgnette_config") {
+  pkg_deps = [ "libpermission_broker-client" ]
+}
+
+static_library("liblorgnette") {
+  sources = [
+    "daemon.cc",
+    "enums.cc",
+    "epson_probe.cc",
+    "firewall_manager.cc",
+    "guess_source.cc",
+    "image_readers/image_reader.cc",
+    "image_readers/jpeg_reader.cc",
+    "image_readers/png_reader.cc",
+    "ippusb_device.cc",
+    "manager.cc",
+    "sane_client.cc",
+    "sane_client_fake.cc",
+    "sane_client_impl.cc",
+  ]
+  all_dependent_configs = [ ":liblorgnette_config" ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":lorgnette-adaptors" ]
+}
+
+executable("lorgnette") {
+  sources = [ "main.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":liblorgnette" ]
+}
+
+executable("lorgnette_cli") {
+  sources = [
+    "guess_source.cc",
+    "lorgnette_cli.cc",
+  ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":lorgnette-proxies" ]
+}
+
+if (use.test) {
+  executable("lorgnette_unittest") {
+    sources = [
+      "image_readers/jpeg_reader_test.cc",
+      "image_readers/png_reader_test.cc",
+      "ippusb_device_test.cc",
+      "manager_test.cc",
+      "sane_client_test.cc",
+      "test_util.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":target_defaults",
+    ]
+    deps = [
+      ":liblorgnette",
+      "//common-mk/testrunner:testrunner",
+    ]
+  }
+}

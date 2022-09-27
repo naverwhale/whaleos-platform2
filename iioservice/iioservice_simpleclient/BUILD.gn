@@ -1,0 +1,47 @@
+# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+
+group("all") {
+  deps = [
+    ":iioservice_query",
+    ":iioservice_simpleclient",
+  ]
+}
+
+pkg_config("target_defaults_pkg_deps") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "libmojo",
+  ]
+}
+
+static_library("libiioservice_simpleclient") {
+  sources = [
+    "daemon_observer.cc",
+    "daemon_query.cc",
+    "observer_impl.cc",
+    "query_impl.cc",
+    "sensor_client.cc",
+  ]
+  configs += [ ":target_defaults_pkg_deps" ]
+  deps = [
+    "//iioservice/libiioservice_ipc:libiioservice_ipc",
+    "//iioservice/libiioservice_ipc:libiioservice_ipc_mojom",
+  ]
+}
+
+executable("iioservice_simpleclient") {
+  sources = [ "iioservice_simpleclient.cc" ]
+  configs += [ ":target_defaults_pkg_deps" ]
+  deps = [ ":libiioservice_simpleclient" ]
+}
+
+executable("iioservice_query") {
+  sources = [ "iioservice_query.cc" ]
+  configs += [ ":target_defaults_pkg_deps" ]
+  deps = [ ":libiioservice_simpleclient" ]
+}

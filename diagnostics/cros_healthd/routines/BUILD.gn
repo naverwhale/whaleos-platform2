@@ -1,0 +1,155 @@
+# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+
+pkg_config("common_pkg_deps") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+  ]
+}
+
+executable("urandom") {
+  sources = [ "urandom/main.cc" ]
+  configs += [ ":common_pkg_deps" ]
+}
+
+pkg_config("smartctl-check_pkg_deps") {
+  pkg_deps = [ "libdebugd-client" ]
+}
+
+executable("smartctl-check") {
+  sources = [
+    "smartctl_check/main.cc",
+    "smartctl_check/smartctl_check_utils.cc",
+  ]
+  configs += [
+    ":smartctl-check_pkg_deps",
+    ":common_pkg_deps",
+  ]
+}
+
+executable("floating-point-accuracy") {
+  sources = [ "floating_point/main.cc" ]
+  configs += [ ":common_pkg_deps" ]
+  cflags_cc = [
+    "-msse",
+    "-mno-mmx",
+  ]
+}
+
+executable("prime-search") {
+  sources = [
+    "prime_search/main.cc",
+    "prime_search/prime_number_search.cc",
+  ]
+  configs += [ ":common_pkg_deps" ]
+}
+
+pkg_config("libdiag_routine_pkg_deps") {
+  pkg_deps = [ "re2" ]
+}
+
+source_set("libdiag_routine") {
+  configs += [
+    ":common_pkg_deps",
+    ":libdiag_routine_pkg_deps",
+  ]
+  deps = [
+    "//diagnostics/common:libcommon",
+    "//diagnostics/cros_healthd/system:libcros_healthd_system",
+    "//diagnostics/mojo:cros_healthd_mojo_bindings",
+  ]
+  sources = [
+    "ac_power/ac_power.cc",
+    "arc_dns_resolution/arc_dns_resolution.cc",
+    "arc_http/arc_http.cc",
+    "arc_ping/arc_ping.cc",
+    "battery_capacity/battery_capacity.cc",
+    "battery_charge/battery_charge.cc",
+    "battery_charge/battery_charge_constants.cc",
+    "battery_discharge/battery_discharge.cc",
+    "battery_discharge/battery_discharge_constants.cc",
+    "battery_health/battery_health.cc",
+    "captive_portal/captive_portal.cc",
+    "cpu_cache/cpu_cache.cc",
+    "cpu_stress/cpu_stress.cc",
+    "diag_process_adapter_impl.cc",
+    "disk_read/disk_read.cc",
+    "dns_latency/dns_latency.cc",
+    "dns_resolution/dns_resolution.cc",
+    "dns_resolver_present/dns_resolver_present.cc",
+    "floating_point/floating_point_accuracy.cc",
+    "gateway_can_be_pinged/gateway_can_be_pinged.cc",
+    "has_secure_wifi_connection/has_secure_wifi_connection.cc",
+    "http_firewall/http_firewall.cc",
+    "https_firewall/https_firewall.cc",
+    "https_latency/https_latency.cc",
+    "lan_connectivity/lan_connectivity.cc",
+    "memory/memory.cc",
+    "memory/memory_constants.cc",
+    "nvme_self_test/nvme_self_test.cc",
+    "nvme_wear_level/nvme_wear_level.cc",
+    "prime_search/prime_search.cc",
+    "shared_defaults.cc",
+    "signal_strength/signal_strength.cc",
+    "simple_routine.cc",
+    "smartctl_check/smartctl_check.cc",
+    "subproc_routine.cc",
+    "urandom/urandom.cc",
+    "video_conferencing/video_conferencing.cc",
+  ]
+}
+
+if (use.test) {
+  source_set("libroutine_test_utils") {
+    configs += [ "//common-mk:test" ]
+    deps = [ "//diagnostics/mojo:cros_healthd_mojo_bindings" ]
+    sources = [ "routine_test_utils.cc" ]
+  }
+
+  source_set("routine_test") {
+    sources = [
+      "ac_power/ac_power_test.cc",
+      "arc_dns_resolution/arc_dns_resolution_test.cc",
+      "arc_http/arc_http_test.cc",
+      "arc_ping/arc_ping_test.cc",
+      "battery_capacity/battery_capacity_test.cc",
+      "battery_charge/battery_charge_test.cc",
+      "battery_discharge/battery_discharge_test.cc",
+      "battery_health/battery_health_test.cc",
+      "captive_portal/captive_portal_test.cc",
+      "dns_latency/dns_latency_test.cc",
+      "dns_resolution/dns_resolution_test.cc",
+      "dns_resolver_present/dns_resolver_present_test.cc",
+      "gateway_can_be_pinged/gateway_can_be_pinged_test.cc",
+      "has_secure_wifi_connection/has_secure_wifi_connection_test.cc",
+      "http_firewall/http_firewall_test.cc",
+      "https_firewall/https_firewall_test.cc",
+      "https_latency/https_latency_test.cc",
+      "lan_connectivity/lan_connectivity_test.cc",
+      "memory/memory_test.cc",
+      "nvme_self_test/nvme_self_test_test.cc",
+      "nvme_wear_level/nvme_wear_level_test.cc",
+      "prime_search/prime_number_search.cc",
+      "prime_search/prime_number_search_test.cc",
+      "signal_strength/signal_strength_test.cc",
+      "simple_routine_test.cc",
+      "smartctl_check/smartctl_check_utils.cc",
+      "smartctl_check/smartctl_check_utils_test.cc",
+      "subproc_routine_test.cc",
+      "video_conferencing/video_conferencing_test.cc",
+    ]
+    configs += [ "//common-mk:test" ]
+    deps = [
+      ":libdiag_routine",
+      ":libroutine_test_utils",
+      "//diagnostics/common:libcommon",
+      "//diagnostics/common:libcommon_test_utils",
+      "//diagnostics/common:mojo_testrunner",
+      "//diagnostics/cros_healthd/system:libcros_healthd_system_test_utils",
+    ]
+  }
+}

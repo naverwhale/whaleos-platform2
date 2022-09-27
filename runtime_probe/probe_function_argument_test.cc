@@ -1,0 +1,83 @@
+// Copyright 2021 The Chromium OS Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+#include <map>
+#include <string>
+
+#include <gtest/gtest.h>
+
+#include "runtime_probe/probe_function.h"
+#include "runtime_probe/probe_function_argument.h"
+
+namespace runtime_probe {
+
+class Mock1ProbeFunction : public ProbeFunction {
+  using ProbeFunction::ProbeFunction;
+
+ public:
+  NAME_PROBE_FUNCTION("mock1");
+
+  DataType EvalImpl() const override { return {}; }
+};
+
+class Mock2ProbeFunction : public ProbeFunction {
+  using ProbeFunction::ProbeFunction;
+
+ public:
+  NAME_PROBE_FUNCTION("mock2");
+
+  template <typename T>
+  static auto FromKwargsValue(const base::Value& dict_value) {
+    PARSE_BEGIN();
+    PARSE_ARGUMENT(a_str);
+    PARSE_ARGUMENT(a_int);
+    PARSE_ARGUMENT(a_bool);
+    PARSE_ARGUMENT(default_int, 1);
+    PARSE_END();
+  }
+  DataType EvalImpl() const override { return {}; }
+
+  std::string a_str_;
+  int a_int_;
+  bool a_bool_;
+  int default_int_;
+};
+
+TEST(ProbeFunctionArgumentTest, EmptyArgument) {
+  const base::Value empty_value(base::Value::Type::DICTIONARY);
+  base::Value arg_value(base::Value::Type::DICTIONARY);
+  arg_value.SetKey("a_str", base::Value("a_str"));
+
+  auto mock_func1 = CreateProbeFunction<Mock1ProbeFunction>(empty_value);
+  EXPECT_NE(mock_func1, nullptr);
+
+  auto mock_func2 = CreateProbeFunction<Mock1ProbeFunction>(arg_value);
+  EXPECT_EQ(mock_func2, nullptr);
+}
+
+TEST(ProbeFunctionArgumentTest, WithArguments) {
+  const base::Value empty_value(base::Value::Type::DICTIONARY);
+  base::Value arg_value(base::Value::Type::DICTIONARY);
+  arg_value.SetStringKey("a_str", "a_str");
+  arg_value.SetIntKey("a_int", 1);
+  arg_value.SetBoolKey("a_bool", true);
+
+  auto mock_func1 = CreateProbeFunction<Mock2ProbeFunction>(empty_value);
+  EXPECT_EQ(mock_func1, nullptr);
+
+  auto mock_func2 = CreateProbeFunction<Mock2ProbeFunction>(arg_value);
+  EXPECT_NE(mock_func2, nullptr);
+  EXPECT_EQ(mock_func2->default_int_, 1);
+
+  arg_value.SetKey("default_int", base::Value(2));
+  auto mock_func3 = CreateProbeFunction<Mock2ProbeFunction>(arg_value);
+  EXPECT_NE(mock_func3, nullptr);
+  EXPECT_EQ(mock_func3->default_int_, 2);
+
+  arg_value.SetKey("invalid_field", base::Value("invalid_field"));
+  auto mock_func4 = CreateProbeFunction<Mock2ProbeFunction>(arg_value);
+  EXPECT_EQ(mock_func4, nullptr);
+}
+
+}  // namespace runtime_probe

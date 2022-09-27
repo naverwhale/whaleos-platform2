@@ -1,0 +1,270 @@
+# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+import("//common-mk/proto_library.gni")
+
+group("all") {
+  deps = [
+    ":g2ftool",
+    ":u2fd",
+    ":webauthntool",
+  ]
+  if (use.test) {
+    deps += [
+      ":g2f_client_test",
+      ":u2fd_test_runner",
+    ]
+  }
+  if (use.fuzzer) {
+    deps += [
+      ":u2f_apdu_fuzzer",
+      ":u2f_msg_handler_fuzzer",
+      ":u2f_webauthn_fuzzer",
+      ":u2fhid_fuzzer",
+    ]
+  }
+}
+
+pkg_config("target_defaults") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "libsession_manager-client",
+  ]
+}
+
+pkg_config("u2fd_config") {
+  # NOSORT
+  pkg_deps = [
+    "libattestation-client",
+    "libcryptohome-client",
+    "libmetrics",
+    "libpower_manager-client",
+    "libtrunks",
+    "libuser_data_auth-client",
+    "openssl",
+
+    # system_api depends on protobuf (or protobuf-lite). It must appear
+    # before protobuf here or the linker flags won't be in the right
+    # order.
+    "system_api",
+  ]
+  if (use.fuzzer) {
+    pkg_deps += [ "protobuf" ]
+  } else {
+    pkg_deps += [ "protobuf-lite" ]
+  }
+}
+
+static_library("libu2fd") {
+  sources = [
+    "allowlisting_util.cc",
+    "tpm_vendor_cmd.cc",
+    "u2f_apdu.cc",
+    "u2f_daemon.cc",
+    "u2f_msg_handler.cc",
+    "u2fhid.cc",
+    "uhid_device.cc",
+    "user_state.cc",
+    "util.cc",
+    "webauthn_handler.cc",
+    "webauthn_storage.cc",
+  ]
+  configs += [
+    ":target_defaults",
+    ":u2fd_config",
+  ]
+  libs = [
+    "policy",
+    "cbor",
+  ]
+  deps = [
+    ":user_state_proto",
+    "//common-mk/external_dependencies:policy-protos",
+  ]
+}
+
+executable("u2fd") {
+  sources = [ "main.cc" ]
+  configs += [ ":target_defaults" ]
+  libs = [ "policy" ]
+  deps = [ ":libu2fd" ]
+}
+
+proto_library("user_state_proto") {
+  proto_in_dir = "."
+  proto_out_dir = "include/u2fd"
+  sources = [ "user_state.proto" ]
+}
+
+executable("g2ftool") {
+  sources = [ "g2f_tools/g2ftool.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":libg2fclient" ]
+}
+
+pkg_config("webauthntool_config") {
+  # NOSORT
+  pkg_deps = [
+    # system_api depends on protobuf (or protobuf-lite). It must appear
+    # before protobuf here or the linker flags won't be in the right
+    # order.
+    "system_api",
+  ]
+  if (use.fuzzer) {
+    pkg_deps += [ "protobuf" ]
+  } else {
+    pkg_deps += [ "protobuf-lite" ]
+  }
+}
+
+executable("webauthntool") {
+  sources = [ "g2f_tools/webauthntool.cc" ]
+  configs += [
+    ":target_defaults",
+    ":webauthntool_config",
+  ]
+}
+
+static_library("libg2fclient") {
+  sources = [ "g2f_tools/g2f_client.cc" ]
+  configs += [ ":target_defaults" ]
+  libs = [ "hidapi-hidraw" ]
+}
+
+if (use.test) {
+  pkg_config("g2f_client_test_config") {
+    pkg_deps = [ "libchrome-test" ]
+  }
+
+  executable("g2f_client_test") {
+    sources = [
+      "g2f_tools/g2f_client.cc",
+      "g2f_tools/g2f_client_test.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":target_defaults",
+      ":g2f_client_test_config",
+    ]
+    deps = [ "//common-mk/testrunner" ]
+  }
+
+  pkg_config("u2fd_test_config") {
+    pkg_deps = [
+      "libbrillo-test",
+      "libchrome-test",
+      "libuser_data_auth-client-test",
+    ]
+  }
+
+  executable("u2fd_test_runner") {
+    sources = [
+      "allowlisting_util_test.cc",
+      "u2f_msg_handler_test.cc",
+      "webauthn_handler_test.cc",
+      "webauthn_storage_test.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":target_defaults",
+      ":u2fd_config",
+      ":u2fd_test_config",
+    ]
+    deps = [
+      ":libu2fd",
+      "//common-mk/testrunner",
+    ]
+  }
+}
+
+if (use.fuzzer) {
+  executable("u2f_apdu_fuzzer") {
+    sources = [
+      "fuzzers/u2f_apdu_fuzzer.cc",
+      "tpm_vendor_cmd.cc",
+      "u2f_apdu.cc",
+      "util.cc",
+    ]
+    configs += [
+      "//common-mk/common_fuzzer:common_fuzzer",
+      ":target_defaults",
+    ]
+    pkg_deps = [
+      "libtrunks",
+      "openssl",
+    ]
+  }
+
+  executable("u2fhid_fuzzer") {
+    sources = [
+      "fuzzers/fake_u2f_msg_handler.cc",
+      "fuzzers/fake_uhid_device.cc",
+      "fuzzers/u2fhid_fuzzer.cc",
+      "tpm_vendor_cmd.cc",
+      "u2f_apdu.cc",
+      "u2fhid.cc",
+      "util.cc",
+    ]
+    configs += [
+      "//common-mk/common_fuzzer:common_fuzzer",
+      ":target_defaults",
+    ]
+    pkg_deps = [
+      "libtrunks",
+      "openssl",
+    ]
+  }
+
+  executable("u2f_msg_handler_fuzzer") {
+    sources = [
+      "fuzzers/fuzzed_allowlisting_util_factory.cc",
+      "fuzzers/fuzzed_user_state.cc",
+      "fuzzers/u2f_msg_handler_fuzzer.cc",
+    ]
+    configs += [
+      "//common-mk/common_fuzzer:common_fuzzer",
+      "//common-mk:test",
+      ":target_defaults",
+    ]
+    libs = [ "trunks_test" ]
+    deps = [ ":libu2fd" ]
+  }
+
+  executable("u2f_webauthn_fuzzer") {
+    sources = [
+      "fuzzers/fuzzed_allowlisting_util_factory.cc",
+      "fuzzers/fuzzed_user_state.cc",
+      "fuzzers/webauthn_fuzzer.cc",
+    ]
+    configs += [
+      "//common-mk/common_fuzzer:common_fuzzer",
+      "//common-mk:test",
+      ":target_defaults",
+      ":u2fd_config",
+      ":local_proto_include",
+    ]
+    libs = [ "trunks_test" ]
+    deps = [
+      ":libu2fd",
+      ":webauthn_fuzzer_data_proto",
+    ]
+    pkg_deps = [
+      "libchrome-test",
+      "libprotobuf-mutator",
+      "libuser_data_auth-client-test",
+    ]
+  }
+  config("local_proto_include") {
+    include_dirs = [ "${sysroot}/usr/include/u2f/proto_bindings/" ]
+  }
+  proto_library("webauthn_fuzzer_data_proto") {
+    proto_in_dir = "fuzzers"
+    proto_out_dir = "include/u2fd/fuzzers"
+    proto_lib_dirs = [ "${sysroot}/usr/include/chromeos/dbus/u2f" ]
+    configs = [ ":local_proto_include" ]
+    sources = [ "${proto_in_dir}/webauthn_fuzzer_data.proto" ]
+  }
+}

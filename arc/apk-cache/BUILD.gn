@@ -1,0 +1,115 @@
+# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+
+group("all") {
+  deps = [
+    ":apk-cache-cleaner",
+    ":apk-cache-ctl",
+  ]
+  if (use.test) {
+    deps += [
+      ":apk-cache-cleaner_testrunner",
+      ":apk-cache-ctl_testrunner",
+    ]
+  }
+}
+
+pkg_config("libapk-cache-common_config") {
+  pkg_deps = [
+    "libchrome",
+    "sqlite3",
+  ]
+}
+
+static_library("libapk-cache") {
+  sources = [
+    "apk_cache_database.cc",
+    "apk_cache_utils.cc",
+  ]
+  configs += [ ":libapk-cache-common_config" ]
+}
+
+static_library("libapk-cache-cleaner") {
+  sources = [
+    "cache_cleaner.cc",
+    "cache_cleaner_db.cc",
+    "cache_cleaner_utils.cc",
+  ]
+  configs += [ ":libapk-cache-common_config" ]
+}
+
+static_library("libapk-cache-ctl") {
+  sources = [ "apk_cache_ctl_ls.cc" ]
+  configs += [ ":libapk-cache-common_config" ]
+}
+
+pkg_config("apk-cache-common_config") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+  ]
+}
+
+executable("apk-cache-cleaner") {
+  sources = [ "cache_cleaner_main.cc" ]
+  configs += [ ":apk-cache-common_config" ]
+  deps = [
+    ":libapk-cache",
+    ":libapk-cache-cleaner",
+  ]
+}
+
+executable("apk-cache-ctl") {
+  sources = [ "apk_cache_ctl_main.cc" ]
+  configs += [ ":apk-cache-common_config" ]
+  deps = [
+    ":libapk-cache",
+    ":libapk-cache-ctl",
+  ]
+}
+
+if (use.test) {
+  pkg_config("apk-cache-common_testrunner_config") {
+    pkg_deps = [
+      "libchrome",
+      "libchrome-test",
+      "sqlite3",
+    ]
+  }
+  executable("apk-cache-cleaner_testrunner") {
+    sources = [
+      "apk_cache_database_test.cc",
+      "apk_cache_database_test_utils.cc",
+      "cache_cleaner_db_test.cc",
+      "cache_cleaner_test.cc",
+      "cache_cleaner_utils_test.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":apk-cache-common_testrunner_config",
+    ]
+    deps = [
+      ":libapk-cache",
+      ":libapk-cache-cleaner",
+      "//common-mk/testrunner:testrunner",
+    ]
+  }
+  executable("apk-cache-ctl_testrunner") {
+    sources = [
+      "apk_cache_ctl_test.cc",
+      "apk_cache_database_test_utils.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":apk-cache-common_testrunner_config",
+    ]
+    deps = [
+      ":libapk-cache",
+      ":libapk-cache-ctl",
+      "//common-mk/testrunner:testrunner",
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+#! /bin/sh
+
+# Copyright 2015 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+#
+# This script obtains the EC version
+
+EC_INFO_FILE="/var/log/ec_info.txt"
+
+# Attempts to insert i2c-dev as it may not be done during init on all platforms
+if ! modprobe i2c-dev; then
+  exit 0
+fi
+
+rm -f ${EC_INFO_FILE}
+
+for ec_type in ec pd sh; do
+  if out=$(mosys -l ${ec_type} info 2> /dev/null); then
+    # If a mosys sub-command is not available, mosys will fail with a non-zero
+    # exit code and print the help menu. Write the output only if the command
+    # succeeded.
+    echo "${out}" >> ${EC_INFO_FILE}
+  fi
+done
+
+p=0
+while out=$(mosys -l pd chip ${p} 2> /dev/null); do
+	echo "TCPC Port${p}:" >> "${EC_INFO_FILE}"
+	echo "${out}" >> "${EC_INFO_FILE}"
+	: $(( p += 1 ))
+done

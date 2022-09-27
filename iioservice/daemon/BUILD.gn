@@ -1,0 +1,87 @@
+# Copyright 2020 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+
+group("all") {
+  deps = [ ":iioservice" ]
+
+  if (use.test) {
+    deps += [ ":iioservice_testrunner" ]
+  }
+}
+
+pkg_config("target_defaults_pkg_deps") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "libmetrics",
+    "libmojo",
+  ]
+}
+
+static_library("libiioservice") {
+  sources = [
+    "common_types.cc",
+    "daemon.cc",
+    "fusion.cc",
+    "samples_handler.cc",
+    "samples_handler_base.cc",
+    "samples_handler_fusion.cc",
+    "samples_handler_fusion_gravity.cc",
+    "sensor_device_fusion.cc",
+    "sensor_device_fusion_gravity.cc",
+    "sensor_device_impl.cc",
+    "sensor_hal_server_impl.cc",
+    "sensor_metrics.cc",
+    "sensor_service_impl.cc",
+  ]
+  configs += [ ":target_defaults_pkg_deps" ]
+  public_pkg_deps = [ "libmems" ]
+  deps = [
+    "//iioservice/libiioservice_ipc:libiioservice_ipc",
+    "//iioservice/libiioservice_ipc:libiioservice_ipc_mojom",
+  ]
+}
+
+executable("iioservice") {
+  sources = [ "main.cc" ]
+  configs += [ ":target_defaults_pkg_deps" ]
+  deps = [ ":libiioservice" ]
+}
+
+if (use.test) {
+  pkg_config("iioservice_testrunner_pkg_deps") {
+    pkg_deps = [
+      "libbrillo-test",
+      "libchrome-test",
+      "libiio",
+    ]
+  }
+
+  executable("iioservice_testrunner") {
+    sources = [
+      "samples_handler_fusion_test.cc",
+      "samples_handler_test.cc",
+      "sensor_device_fusion_gravity_test.cc",
+      "sensor_device_fusion_test.cc",
+      "sensor_device_impl_test.cc",
+      "sensor_hal_server_impl_test.cc",
+      "sensor_metrics_mock.cc",
+      "sensor_service_impl_test.cc",
+      "test_fakes.cc",
+      "testrunner.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":iioservice_testrunner_pkg_deps",
+      ":target_defaults_pkg_deps",
+    ]
+    pkg_deps = [ "libmems_test_support" ]
+    deps = [
+      ":libiioservice",
+      "//common-mk/testrunner",
+    ]
+  }
+}

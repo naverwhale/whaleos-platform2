@@ -1,0 +1,32 @@
+#
+# Copyright 2018 The Chromium OS Authors. All rights reserved.
+#
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+chromeos:
+  devices:
+    - $name: "IdentityMatch"
+      skus:
+        - config:
+            identity:
+              # - smbios-name-match should be case insensitive.
+              # - sku-id should match, as it was unspecified.
+              smbios-name-match: "SMBIOSnamematch"
+            wallpaper: "wallpaper-overridden-by-identity"
+    - $name: "NameMatch"
+      skus:
+        - config:
+            name: "{{$name}}"
+            wallpaper: "wallpaper-overridden-by-name"
+    - $name: "NoMatchAppended"
+      skus:
+        - config:
+            name: "{{$name}}"
+            identity:
+              platform-name: "PlatformName"
+              smbios-name-match: "SMBiosNameMatch"
+              sku-id: 4
+            firmware:
+              image-name: "foo"
+              no-firmware: true

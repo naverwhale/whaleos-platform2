@@ -1,0 +1,202 @@
+# Copyright 2018 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/generate-dbus-adaptors.gni")
+import("//common-mk/pkg_config.gni")
+import("//common-mk/proto_library.gni")
+
+group("all") {
+  deps = [
+    ":dlcservice",
+    ":dlcservice_adaptors",
+    ":dlcservice_util",
+    ":dlcverify",
+    ":libdlcservice",
+    ":libdlcservice_utils",
+    ":ref_count-proto",
+  ]
+  if (use.test) {
+    deps += [ ":dlcservice_tests" ]
+  }
+  if (use.fuzzer) {
+    deps += [
+      ":dlcservice_boot_device_fuzzer",
+      ":dlcservice_boot_slot_fuzzer",
+    ]
+  }
+}
+
+pkg_config("target_defaults") {
+  # NOSORT
+  pkg_deps = [
+    "libchrome",
+    "libbrillo",
+    "libimageloader-client",
+    "libmetrics",
+    "libsession_manager-client",
+    "libimageloader-manifest",
+    "libupdate_engine-client",
+
+    # system_api depends on protobuf (or protobuf-lite). It must appear
+    # before protobuf here or the linker flags won't be in the right
+    # order.
+    "system_api",
+    "vboot_host",
+  ]
+  if (use.fuzzer) {
+    pkg_deps += [ "protobuf" ]
+  } else {
+    pkg_deps += [ "protobuf-lite" ]
+  }
+}
+
+pkg_config("dlcservice_util_config") {
+  pkg_deps = [
+    "libdlcservice-client",
+    "libminijail",
+  ]
+}
+
+generate_dbus_adaptors("dlcservice_adaptors") {
+  dbus_service_config = "dbus_adaptors/dbus-service-config.json"
+  dbus_adaptors_out_dir = "include/dlcservice/dbus_adaptors"
+  sources = [ "dbus_adaptors/org.chromium.DlcServiceInterface.xml" ]
+}
+
+# Protobufs.
+proto_library("ref_count-proto") {
+  proto_in_dir = "."
+  proto_out_dir = "include/dlcservice"
+  sources = [ "ref_count.proto" ]
+}
+
+# DLC utils related files.
+static_library("libdlcservice_utils") {
+  sources = [
+    "boot/boot_device.cc",
+    "boot/boot_slot.cc",
+    "utils.cc",
+  ]
+  configs += [ ":target_defaults" ]
+}
+
+# DLC verify related files.
+static_library("libdlcverify") {
+  configs += [ ":target_defaults" ]
+  deps = [ ":libdlcservice_utils" ]
+}
+
+# DLC service related files.
+static_library("libdlcservice") {
+  sources = [
+    "daemon.cc",
+    "dbus_adaptors/dbus_adaptor.cc",
+    "dlc.cc",
+    "dlc_manager.cc",
+    "dlc_service.cc",
+    "error.cc",
+    "metrics.cc",
+    "prefs.cc",
+    "ref_count.cc",
+    "system_properties.cc",
+    "system_state.cc",
+  ]
+  configs += [ ":target_defaults" ]
+  libs = [ "rootdev" ]
+  deps = [
+    ":dlcservice_adaptors",
+    ":libdlcservice_utils",
+    ":ref_count-proto",
+  ]
+}
+
+# For dlcservice:
+executable("dlcservice") {
+  sources = [ "main.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":libdlcservice" ]
+}
+
+# For dlcservice_util:
+executable("dlcservice_util") {
+  sources = [ "tools/dlc_service_util.cc" ]
+  configs += [
+    ":target_defaults",
+    ":dlcservice_util_config",
+  ]
+  deps = [ ":libdlcservice_utils" ]
+}
+
+# For dlcverify:
+executable("dlcverify") {
+  sources = [ "tools/dlcverify.cc" ]
+  configs += [ ":target_defaults" ]
+  deps = [ ":libdlcverify" ]
+}
+
+# For test:
+if (use.test) {
+  pkg_config("dlcservice_tests_config") {
+    pkg_deps = [
+      "libbrillo-test",
+      "libchrome-test",
+      "libimageloader-client-test",
+      "libsession_manager-client-test",
+      "libupdate_engine-client-test",
+    ]
+  }
+
+  executable("dlcservice_tests") {
+    sources = [
+      "boot/boot_device_test.cc",
+      "boot/boot_slot_test.cc",
+      "dbus_adaptors/dbus_adaptor_test.cc",
+      "dlc_manager_test.cc",
+      "dlc_service_test.cc",
+      "dlc_test.cc",
+      "error_test.cc",
+      "metrics_test.cc",
+      "prefs_test.cc",
+      "ref_count_test.cc",
+      "system_state_test.cc",
+      "test_utils.cc",
+      "unique_queue_test.cc",
+      "utils_test.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":dlcservice_tests_config",
+      ":target_defaults",
+    ]
+    deps = [
+      ":libdlcservice",
+      "//common-mk/testrunner",
+    ]
+  }
+}
+
+# For fuzzer
+if (use.fuzzer) {
+  pkg_config("dlcservice_fuzzer_config") {
+    pkg_deps = [ "libchrome-test" ]
+  }
+  executable("dlcservice_boot_slot_fuzzer") {
+    sources = [ "boot/boot_slot_fuzzer.cc" ]
+    configs += [
+      "//common-mk/common_fuzzer",
+      ":dlcservice_fuzzer_config",
+      ":target_defaults",
+    ]
+    deps = [ ":libdlcservice" ]
+  }
+  executable("dlcservice_boot_device_fuzzer") {
+    sources = [ "boot/boot_device_fuzzer.cc" ]
+    configs += [
+      "//common-mk/common_fuzzer",
+      ":dlcservice_fuzzer_config",
+      ":target_defaults",
+    ]
+    deps = [ ":libdlcservice" ]
+  }
+}

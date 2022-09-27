@@ -1,0 +1,1081 @@
+# Copyright 2016 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+imports:
+- "power_manager_prefs_schema.yaml"
+
+"$schema": http://json-schema.org/draft-07/schema#
+typeDefs:
+  bcs-file-name: &bcs_file_name
+    type: string
+    build-only-element: true
+    description: Name of the file located in BCS under the respective bcs-overlay.
+  deprecated_string: &deprecated_string
+    type: string
+    description: A deprecated string property to be removed after migration.
+  firmware-build-target: &firmware_build_target
+    type: string
+    description: Build target that will be considered dirty when building/testing
+      locally.
+  proximity-sensor-items: &proximity_sensor_items
+    type: object
+    properties:
+      channel:
+        description: Proximity sensor channel.
+        type: string
+        pattern: "^[a-zA-Z0-9_]+$"
+      hardwaregain:
+        description: Proximity sensor hardware gain.
+        type: string
+        pattern: "^[0-9.]+$"
+      sampling-frequency:
+        description: Proximity sensor sampling frequency.
+        type: string
+        pattern: "^[0-9.]+$"
+      thresh-rising:
+        description: Proximity sensor rising threshold.
+        type: string
+        pattern: "^[0-9.]+$"
+      thresh-falling:
+        description: Proximity sensor falling threshold.
+        type: string
+        pattern: "^[0-9.]+$"
+      thresh-falling-period:
+        description: Proximity sensor falling threshold period (debounce).
+        type: string
+        pattern: "^[0-9.]+$"
+      thresh-rising-period:
+        description: Proximity sensor rising threshold period (debounce).
+        type: string
+        pattern: "^[0-9.]+$"
+      thresh-falling-hysteresis:
+        description: Proximity sensor falling hysteresis.
+        type: string
+        pattern: "^[0-9.]+$"
+      thresh-rising-hysteresis:
+        description: Proximity sensor rising hysteresis.
+        type: string
+        pattern: "^[0-9.]+$"
+    additionalProperties: false
+  # TODO(shapiroc): Migrate to use system-file-v2 instead
+  system-file: &system_file
+    type: object
+    properties:
+      source:
+        description: Source of the file relative to the build system.
+        type: string
+      destination:
+        description: Installation path for the file on the system image.
+        type: string
+    additionalProperties: false
+  # V2 exists because system-file targets were poorly named, so they couldn't
+  # be logically shared for build-time and run-time usage.
+  system-file-v2: &system_file_v2
+    type: object
+    properties:
+      build-path:
+        description: Source of the file relative to the build system.
+        build-only-element: true
+        type: string
+      system-path:
+        description: Installation path for the file on the system image.
+        type: string
+    additionalProperties: false
+    required:
+      - build-path
+      - system-path
+  firmware-file: &firmware_file
+    type: object
+    properties:
+      source:
+        description: Source of the file relative to the build system ${FILESDIR}
+        type: string
+      destination:
+        description: Installation path for the file on the system image.
+        type: string
+      symlink:
+        description: Symlink file that will be installed pointing to the destination.
+        type: string
+    additionalProperties: false
+  sku-id: &sku_id
+    description: SKU/Board strapping pins [configured during board manufacturing](https://chromium.googlesource.com/chromiumos/docs/+/HEAD/design_docs/cros_board_info.md#SKU_ID). Leaving this value unset will cause the config to match any SKU ID.
+    type: integer
+    minimum: -1
+    maximum: 0x7FFFFFFF
+  whitelabel-tag: &whitelabel_tag
+    description: "'whitelabel_tag' value set in the VPD, to add Whitelabel branding over an unbranded base model."
+    type: string
+  customization-id: &customization_id
+    description: "'customization_id' value set in the VPD for non-unibuild Zergs and Whitelabels. Deprecated for use in new products since 2017/07/26."
+    type: string
+  platform-name: &platform_name
+    description: "Defines the name of the mosys platform used. Mosys is the only software which is allowed to used this value."
+    type: string
+  stylus-category: &stylus-category
+    description: "Denotes the category of stylus this device contains."
+    type: string
+    enum:
+    - none
+    - internal
+    - external
+  psu-type: &psu-type
+    description: |
+      Type of PSU the device has:
+      - battery: the device has a battery intended for primary use
+      - AC_primary: the device has a battery, but it is not intended for primary use
+      - AC_only: the device has no battery
+      - no_power: the device does not receive power in any direct manner (e.g., it is virtualized)
+    type: string
+    enum:
+      - battery
+      - AC_primary
+      - AC_only
+      - no_power
+  display-type: &display-type
+    description: "Denotes the type of display this device contains."
+    type: string
+    enum:
+    - default
+    - old
+  form-factor: &form-factor
+    description: "Denotes the form factor of the device."
+    type: string
+    enum:
+     - CHROMEBASE
+     - CHROMEBIT
+     - CHROMEBOOK
+     - CHROMEBOX
+  ath10k-wifi-transmit-power-chain: &ath10k-wifi-transmit-power-chain
+    description: "[ath10k] WiFi power chain for use with QCA ath10k drivers. Limits
+      in units of 0.25 dBm. 5g band power limit applies to all 5g bands."
+    type: object
+    properties:
+      limit-2g:
+        description: "2G band power limit (0.25dBm)"
+        type: integer
+        minimum: 0x0
+        maximum: 0xFF
+      limit-5g:
+        description: "5G band power limit (0.25dBm)"
+        type: integer
+        minimum: 0x0
+        maximum: 0xFF
+    additionalProperties: false
+  rtw-wifi-transmit-power-chain: &rtw-wifi-transmit-power-chain
+    description: "[rtw] WiFi power chain for use with Realtek rtw88 drivers. Limits
+      in units of 0.125 dBm. 5g band 2 (channels 5.35G-5.47G) power limit is not supported."
+    type: object
+    properties:
+      limit-2g:
+        description: "2G band power limit: All 2G band channels. (0.125 dBm)"
+        type: integer
+        minimum: 0x0
+        maximum: 0xFF
+      limit-5g-1:
+        description: "5G band 1 power limit: 5.15G-5.35G channels. (0.125 dBm)"
+        type: integer
+        minimum: 0x0
+        maximum: 0xFF
+      limit-5g-3:
+        description: "5G band 3 power limit: 5.47G-5.725G channels. (0.125 dBm)"
+        type: integer
+        minimum: 0x0
+        maximum: 0xFF
+      limit-5g-4:
+        description: "5G band 4 power limit: 5.725G-5.95G channels. (0.125 dBm)"
+        type: integer
+        minimum: 0x0
+        maximum: 0xFF
+    additionalProperties: false
+  wifi-geo-offsets: &wifi-geo-offsets
+    description: "Offsets which are applied to WiFi power limits depending on the
+      current regulatory domain. Offsets in units of 0.125 dBm. The sum of a geo
+      offset and any power limit to which it applies cannot exceed 255.
+      When the current regulatory domain is unknown or has yet to be determined,
+      the base transmit power limits are used without any geo offsets applied.
+      'geo-offsets-fcc' is used for regulatory domains which follow FCC guidelines,
+      'geo-offsets-eu' is used for regulatory domains which follow ETSI guidelines, and
+      'geo-offsets-rest-of-world' is used for regulatory domains which don't follow
+      FCC or ETSI guidelines."
+    type: object
+    properties:
+      offset-2g:
+        description: "Value to be added to the 2.4GHz WiFi band. (0.125 dBm)"
+        type: integer
+        minimum: 0x0
+        maximum: 0xFF
+      offset-5g:
+        description: "Value to be added to all 5GHz WiFi bands. (0.125 dBm)"
+        type: integer
+        minimum: 0x0
+        maximum: 0xFF
+    additionalProperties: false
+  mtk-wifi-transmit-power-chain: &mtk-wifi-transmit-power-chain
+    description: "[mtk] WiFi power chain for use with MediaTek mt7921 driver. Limits
+      in units of 0.25 dBm."
+    type: object
+    properties:
+      limit-2g:
+        description: "2G band power limit. (0.25 dBm)"
+        type: integer
+        minimum: 0x0
+        maximum: 0xFF
+      limit-5g-1:
+        description: "5G band 1 power limit: 5.15G-5.35G frequency. (0.25 dBm)"
+        type: integer
+        minimum: 0x0
+        maximum: 0xFF
+      limit-5g-2:
+        description: "5G band 2 power limit: 5.35G-5.47G frequency. (0.25 dBm)"
+        type: integer
+        minimum: 0x0
+        maximum: 0xFF
+      limit-5g-3:
+        description: "5G band 3 power limit: 5.47G-5.725G frequency. (0.25 dBm)"
+        type: integer
+        minimum: 0x0
+        maximum: 0xFF
+      limit-5g-4:
+        description: "5G band 4 power limit: 5.725G-5.95G frequency. (0.25 dBm)"
+        type: integer
+        minimum: 0x0
+        maximum: 0xFF
+    additionalProperties: false
+  mtk-wifi-geo-transmit-power-chain: &mtk-wifi-geo-transmit-power-chain
+    description: "[mtk] WiFi power chain of regulatory domain for use with MediaTek mt7921 driver.
+      Limits in units of 0.25 dBm, Offset in units of 0.25 dBm"
+    type: object
+    properties:
+      limit-2g:
+        description: "2G band geo power limit. (0.25 dBm)"
+        type: integer
+        minimum: 0x0
+        maximum: 0xFF
+      limit-5g:
+        description: "5G band geo power limit. (0.25 dBm)"
+        type: integer
+        minimum: 0x0
+        maximum: 0xFF
+      offset-2g:
+        description: "Value to be added to the 2.4GHz WiFi band. (0.25 dBm)"
+        type: integer
+        minimum: 0x0
+        maximum: 0xFF
+      offset-5g:
+        description: "Value to be added to all 5GHz WiFi bands. (0.25 dBm)"
+        type: integer
+        minimum: 0x0
+        maximum: 0xFF
+    additionalProperties: false
+type: object
+properties:
+  chromeos:
+    type: object
+    properties:
+      configs:
+        type: array
+        items:
+          type: object
+          properties:
+            arc:
+              type: object
+              required:
+                - build-properties
+              properties:
+                build-properties:
+                  type: object
+                  required:
+                    - product
+                    - device
+                    - metrics-tag
+                  properties:
+                    product:
+                      description: Product name to report in 'ro.product.name'.
+                        This may be the device name, or it can be something else, to allow
+                        several devices to be grouped into one product.
+                      type: string
+                    device:
+                      description: Device name to report in 'ro.product.device'. This
+                        is often '{product}_cheets' but it can be something else if
+                        desired.
+                      type: string
+                    oem:
+                      description: Original Equipment Manufacturer for this model. This
+                        generally means the OEM name printed on the device.
+                      type: string
+                    marketing-name:
+                      description: Name of this model as it is called in the
+                        market, reported in 'ro.product.model'. This often starts
+                        with '{oem}'.
+                      type: string
+                    metrics-tag:
+                      description: Tag to use to track metrics for this model.
+                        The tag can be shared across many devices if desired, but
+                        this will result in larger granularity for metrics
+                        reporting.  Ideally the metrics system should support
+                        collation of metrics with different tags into groups, but if
+                        this is not supported, this tag can be used to achieve the
+                        same end.  This is reported in 'ro.product.metrics.tag'.
+                      type: string
+                    first-api-level:
+                      description: |
+                        The first Android API level that this model shipped with.
+                        Deprecated since M94 (b/187778952).
+                      type: string
+                    pai-regions:
+                      description: |
+                        (Optional) Comma-separated allow list of region codes
+                        that can be appended to 'ro.oem.key1' for the purpose of
+                        targeting Play Auto Install applications by region. The
+                        value(s) should match the values that would be returned
+                        by `cros_region_data region_code` for the relevant
+                        region(s). If the device's region code is not in the
+                        allow list, or if there is no allow list, 'ro.oem.key1'
+                        will not include the region code. The allow list can
+                        also be a single '*' character to indicate that the
+                        region code should always be appended.
+                      type: string
+                      pattern: "(^([a-zA-Z0-9\\.\\-]+,)*[a-zA-Z0-9\\.\\-]+$)|(^\\*$)"
+                  additionalProperties: false
+                hardware-features:
+                  <<: *system_file_v2
+                  description: |
+                    Defines hardware_features.xml file provided to ARC during
+                    initialization.
+                media-profiles:
+                  <<: *system_file_v2
+                  description: |
+                    Defines media_profiles.xml file provided to ARC during
+                    initialization.
+                scale:
+                  type: integer
+                  description: The screen density value in dpi that will be used
+                    for ARC apps. This value should be from the list of DPIs in
+                    android cdd.
+                  enum:
+                    - 280
+              additionalProperties: false
+            nnpalm:
+              type: object
+              properties:
+                touch-compatible:
+                  description: Optional - false by default but should be true for compatible devices.
+                  type: boolean
+                radius-polynomial:
+                  description: Optional - empty by default.
+                  type: string
+              additionalProperties: false
+            audio:
+              type: object
+              properties:
+                main:
+                  type: object
+                  properties:
+                    cras-config-dir:
+                      description: Subdirectory for model-specific configuration.
+                      type: string
+                    disable-profile:
+                      description: Optional --disable_profile parameter for CRAS deamon.
+                      type: string
+                    ucm-suffix:
+                      description: Optional UCM suffix used to determine model specific
+                        config.
+                      type: string
+                    sound-card-init-conf:
+                      description: Optional model specific config filename for sound_card_init.
+                      type: string
+                    files:
+                      type: array
+                      build-only-element: true
+                      items: *system_file
+                  additionalProperties: false
+                  required:
+                  - cras-config-dir
+              additionalProperties: false
+              required:
+              - main
+            bluetooth:
+              type: object
+              properties:
+                flags:
+                  type: object
+                  properties:
+                    enable-suspend-management:
+                      description: Enable powerd suspend management callbacks.
+                      type: boolean
+                    # TODO(abhishekpandit) - Remove once no longer used
+                    stop-on-suspend:
+                      description: Stop the bluetooth adapter on suspend and start it on resume.
+                      type: boolean
+                    reset-on-resume:
+                      description: Expect bluetooth chip to have reset on resume.
+                      type: boolean
+                  additionalProperties: false
+              additionalProperties: false
+            wifi:
+              type: object
+              description: Sets limits on maximum WiFi transmit power for tablet and non-tablet
+                device configurations. This config must contain properties for ath10k wifi driver,
+                rtw88 wifi driver, mtk driver, or intel driver. Note that configs for the intel driver are
+                delivered as encoded wifi sar hex files.
+              oneOf:
+                - properties:
+                    tablet-mode-power-table-ath10k: *ath10k-wifi-transmit-power-chain
+                    non-tablet-mode-power-table-ath10k: *ath10k-wifi-transmit-power-chain
+                  additionalProperties: false
+                - properties:
+                    tablet-mode-power-table-rtw: *rtw-wifi-transmit-power-chain
+                    non-tablet-mode-power-table-rtw: *rtw-wifi-transmit-power-chain
+                    geo-offsets-fcc: *wifi-geo-offsets
+                    geo-offsets-eu: *wifi-geo-offsets
+                    geo-offsets-rest-of-world: *wifi-geo-offsets
+                  additionalProperties: false
+                - properties:
+                    tablet-mode-power-table-mtk: *mtk-wifi-transmit-power-chain
+                    non-tablet-mode-power-table-mtk: *mtk-wifi-transmit-power-chain
+                    fcc-power-table-mtk: *mtk-wifi-geo-transmit-power-chain
+                    eu-power-table-mtk: *mtk-wifi-geo-transmit-power-chain
+                    rest-of-world-power-table-mtk: *mtk-wifi-geo-transmit-power-chain
+                  additionalProperties: false
+                - properties:
+                    sar-file: *system_file_v2
+                  build-only-element: true
+                  additionalProperties: false
+            brand-code:
+              description: Brand code of the model (also called RLZ code).
+              type: string
+            camera:
+              type: object
+              properties:
+                count:
+                  type: integer
+                  description: Specified the number of cameras on the model.
+                config-file:
+                  <<: *system_file_v2
+                  description: Defines the camera configuration file.
+                clock:
+                  type: string
+                  description: Specified the camera clock on the model.
+                  enum:
+                  - monotonic
+                  - boottime
+                legacy-usb:
+                  type: boolean
+                  description: Indicates if the device has legacy usb cameras.
+                zsl-lookback:
+                  type: integer
+                  description: Specifies the duration to look back for
+                    Zero-Shutter Lag (ZSL) in milliseconds.
+                devices:
+                  type: array
+                  description: List of camera devices on the model. Newly
+                    created models should use this property to define camera
+                    configuration.
+                  items:
+                    type: object
+                    properties:
+                      has-privacy-switch:
+                        type: boolean
+                        description: The camera has a privacy switch that
+                          can disable the output when enabled.
+                      interface:
+                        type: string
+                        description: The interface type of the camera device.
+                        enum:
+                        - usb
+                        - mipi
+                      facing:
+                        type: string
+                        description: Direction the camera faces relative to
+                          device screen.
+                        enum:
+                        - front
+                        - back
+                      orientation:
+                        type: integer
+                        description: Clockwise angle through which the output
+                          image needs to be rotated to be upright on the device
+                          screen in its native orientation.
+                        enum:
+                        - 0
+                        - 90
+                        - 180
+                        - 270
+                      flags:
+                        type: object
+                        description: Bit flags representing camera capabilities
+                          of this device. A camera module can be mounted on this
+                          slot only if all the flags match.
+                        properties:
+                          support-1080p:
+                            type: boolean
+                            description: Supports 1920x1080 resolution.
+                          support-autofocus:
+                            type: boolean
+                            description: Supports auto-focus.
+                        required:
+                        - support-1080p
+                        - support-autofocus
+                        additionalProperties: false
+                      ids:
+                        type: array
+                        description: List of strings each identifies a possible
+                          camera module on this slot. An empty list means this
+                          information is not available.
+                        items:
+                          type: string
+                          description: An identifier string of camera module.
+                            For USB cameras this must be 4-digit hexadecimal VID
+                            and PID separated by a colon, e.g. 0123:abcd. For
+                            MIPI cameras it depends on vendor software usage.
+                    if:
+                      properties:
+                        interface:
+                          const: usb
+                    then:
+                      properties:
+                        ids:
+                          items:
+                            pattern: "[0-9a-f]{4}:[0-9a-f]{4}"
+                    required:
+                    - interface
+                    - facing
+                    - orientation
+                    - flags
+                    additionalProperties: false
+              additionalProperties: false
+            hwid-override:
+              type: string
+              description: |
+                Override the HWID reported by crossystem.  This
+                property should only be used for devices supporting
+                non-ChromeOS firmware, where we don't have the ability
+                to set the HWID in GBB.
+              pattern: "[A-Z0-9]+(-[A-Z]{4})?( [0-9A-F]+(-[0-9A-F]+)*)? ([A-Z2-7]{4}(-[A-Z2-7]{4})*|[A-Z2-7][2-9][A-Z2-7](-[A-Z2-7][2-9][A-Z2-7])*)"
+            fingerprint:
+              type: object
+              description: Contains details about the model's fingerprint implementation.
+              properties:
+                board:
+                  type: string
+                  description: Specifies the fingerprint board in use.
+                sensor-location:
+                  description: Specifies the location of the fingerprint sensor.
+                  type: string
+                  enum:
+                  - none # Explicitly not supported.
+                  - power-button-top-left
+                  - keyboard-bottom-left
+                  - keyboard-bottom-right
+                  - keyboard-top-right
+                  - right-side
+                  - left-side
+                fingerprint-sensor-type:
+                  description: Type of FP sensor. Currently describes whether FP
+                    is overlapped on the power button or not.
+                  type: string
+                  enum:
+                    - stand-alone
+                    - on-power-button
+                ro-version:
+                  description: RO version for the fingerprint firmware for the
+                    FPMCU specified by the "board" property. If not specified,
+                    the default RO version for the FPMCU is used.
+                  type: string
+                  build-only-element: true
+              additionalProperties: false
+              dependencies:
+                ro-version:
+                  - board
+            firmware:
+              type: object
+              properties:
+                bcs-overlay:
+                  description: BCS overlay path used to determine BCS file path for binary
+                    firmware downloads.
+                  type: string
+                  build-only-element: true
+                build-targets:
+                  type: object
+                  build-only-element: true
+                  properties:
+                    base:
+                      description: Build target of the base EC firmware for a detachable device,
+                        that will be considered dirty when building/testing
+                      type: string
+                    ec_extras:
+                      type: array
+                      items:
+                        type: string
+                        description: Extra EC build targets to build within chromeos-ec.
+                    bmpblk: *firmware_build_target
+                    coreboot: *firmware_build_target
+                    gsc: *firmware_build_target
+                    depthcharge: *firmware_build_target
+                    ec: *firmware_build_target
+                    ish: *firmware_build_target
+                    libpayload: *firmware_build_target
+                    u-boot: *firmware_build_target
+                    zephyr-ec:
+                      type: string
+                      description: Specifies the list of Zephyr-based firmware
+                        targets to build.
+                  additionalProperties: false
+                ec-ro-image: *bcs_file_name
+                pd-ro-image: *bcs_file_name
+                key-id:
+                  description: Key ID from the signer key set that is used to sign the
+                    given firmware image.
+                  type: string
+                  build-only-element: true
+                main-ro-image: *bcs_file_name
+                main-rw-image: *bcs_file_name
+                name:
+                  description: This is a human-recognizable name used to refer to the firmware.
+                    It will be used when generating the shellball via firmware packer.
+                    Mainly, this is only for compatibility testing with device tree (since DT
+                    allowed firmwares to be named).
+                  type: string
+                  build-only-element: true
+                image-name:
+                  description: The name of the firmware image used by the
+                    firmware updater. Typically the device name, but can differ
+                    when a device may have two or more different firmware
+                    images.
+                  type: string
+                  build-only-element: false
+                no-firmware:
+                  description: Does nothing and pending removal. Do not set.
+                    ([Bug](https://crbug.com/1072007))
+                  type: boolean
+                  build-only-element: true
+                firmware-config:
+                  description: The firmware config bitmap to be flashed to the CBI. This field is
+                    used in the factory.
+                  type: integer
+                  build-only-element: false
+              additionalProperties: false
+            firmware-signing:
+              type: object
+              build-only-element: true
+              properties:
+                key-id:
+                  description: Key ID from the signer key set that is used to sign the
+                    given firmware image.
+                  type: string
+                signature-id:
+                  description: ID used to generate keys/keyblocks in the firmware
+                    signing output.
+                  type: string
+                sig-id-in-customization-id:
+                  description: Indicates that this model cannot be decoded by the mapping table.
+                    Instead the model is stored in the VPD (Vital Product Data) region in the
+                    customization_id property. This allows us to determine the
+                    model to use in the factory during the finalization stage. Note
+                    that if the VPD is wiped then the model will be lost. This may
+                    mean that the device will revert back to a generic model, or
+                    may not work. It is not possible in general to test whether the
+                    model in the VPD is correct at run-time. We simply assume that
+                    it is. The advantage of using this property is that no hardware
+                    changes are needed to change one model into another. For example
+                    we can create 20 different whitelabel boards, all with the same
+                    hardware, just by changing the customization_id that is written
+                    into SPI flash.
+                  type: boolean
+              required:
+                - key-id
+                - signature-id
+              additionalProperties: false
+            detachable-base:
+              type: object
+              description: "Contains the configuration for the hammerd which
+                is used to update the detachable base firmware."
+              properties:
+                ec-image-name:
+                  description: "The target EC binary name which is placed under
+                    /lib/firmware."
+                  type: string
+                touch-image-name:
+                  description: "The touchpad binary name which is placed under
+                    /lib/firmware. This is only needed if the detachable base
+                    contains touchpad."
+                  type: string
+                vendor-id:
+                  description: "The Vendor ID of the detachable base. This
+                    value can be queried by command 'lsusb'.
+                    By taking this as an example:
+                    Bus 001 Device 032: ID 18d1:503c Google Inc.
+                    the vendor-id is 6353(=0x18d1)."
+                  type: integer
+                product-id:
+                  description: "The Product ID of the detachable base. This
+                    value can be queried by command 'lsusb'.
+                    By taking this as an example:
+                    Bus 001 Device 032: ID 18d1:503c Google Inc.
+                    the product-id is 20540(=0x503c)."
+                  type: integer
+                usb-path:
+                  description: "Searches and finds the idVendor and idProduct
+                    under sysfs /sys/bus/usb/devices/* which matches the
+                    vendor-id and product-id. By taking this as an example:
+                    '/sys/bus/usb/devices/1-1.1'
+                    The usb-path is '1-1.1'."
+                  type: string
+                files:
+                  type: array
+                  build-only-element: true
+                  items: *firmware_file
+              additionalProperties: false
+            identity:
+              type: object
+              description: Defines attributes that are used by cros_config to detect the identity
+                of the platform and which corresponding config should be used.
+                This tuple must either contain x86 properties only or ARM properties only.
+              anyOf:
+                - properties:
+                    smbios-name-match:
+                      description: "[x86] Firmware name built into the firmware and reflected back
+                        out in the SMBIOS tables. Leaving this value unset will cause the config
+                        to match any SMBIOS product name."
+                      type: string
+                    sku-id: *sku_id
+                    platform-name: *platform_name
+                    customization-id: *customization_id
+                    whitelabel-tag: *whitelabel_tag
+                  additionalProperties: false
+                - properties:
+                    device-tree-compatible-match:
+                      description: "[ARM] String pattern (partial) that is matched against the
+                        contents of /proc/device-tree/compatible on ARM devices."
+                      type: string
+                    sku-id: *sku_id
+                    platform-name: *platform_name
+                    customization-id: *customization_id
+                    whitelabel-tag: *whitelabel_tag
+                  additionalProperties: false
+            keyboard:
+              type: object
+              description: Contains details about the model's keyboard.
+              properties:
+                numpad:
+                  type: boolean
+                  description: Specifies the existence of numpad.
+                backlight:
+                  type: boolean
+                  description: Specifies the existence of backlight.
+            name:
+              type: string
+              pattern: "^[_a-zA-Z0-9]{3,}"
+              description: Google code name for the given model. While it is OK to use this string
+                for human-display purposes (such as in a debug log or help dialog), or for a
+                searchable-key in metrics collection, it is not recommended to use this property
+                for creating model-specific behaviors. In this case, add a property to the schema
+                which describes your behavior and use that instead.
+            power:
+              description: Defines settings that control power management functions.
+                This mostly defines power_manager preferences, but there are a few
+                other power related settings included.
+                For details about each power_manager preference, see -
+                src/platform2/power_manager/common/power_constants.h/cc
+                For examples on setting these properties (including multiline examples), see
+                the power config example in libcros_config/test.yaml
+              type: object
+              properties:
+                <<: *powerd_prefs
+                allow-ambient-eq:
+                  description: Enable (1) or disable (0) Ambient EQ.
+                  type: string
+                  pattern: "^[01]$"
+                autobrightness:
+                  type: object
+                  properties:
+                    config-file: *system_file_v2
+                  additionalProperties: false
+                  required:
+                  - config-file
+                touchpad-wakeup:
+                  description: Enable (1) or disable (0) wake from touchpad. If not set, default to enable. When set to enable, on many devices, firmware is in charge of controlling whether to wake from touchpad. This flag is reserved for older devices without firmware support (Nami and Coral) and please do not set for new devices.
+                  type: string
+                  pattern: "^[01]$"
+              additionalProperties: false
+            proximity-sensor:
+              description: Defines the proximity sensor settings for devices such as /dev/proximity-wifi and /dev/proximity-wifi-lte typically used for SAR.
+              type: object
+              properties:
+                lte: *proximity_sensor_items
+                wifi: *proximity_sensor_items
+                wifi-lte: *proximity_sensor_items
+              additionalProperties: false
+            test-label:
+              description: Test alias (model) label that will be applied in Autotest and
+                reported for test results.
+              type: string
+            thermal:
+              type: object
+              properties:
+                dptf-dv:
+                  description: System image path to the .dv file containing DPTF (Dynamic Platform
+                    and Thermal Framework) settings.
+                  type: string
+                files:
+                  type: array
+                  build-only-element: true
+                  items: *system_file
+              additionalProperties: false
+              required:
+              - files
+            touch:
+              type: object
+              properties:
+                files:
+                  type: array
+                  build-only-element: true
+                  items: *firmware_file
+              additionalProperties: false
+            wallpaper:
+              description: Base filename of the default wallpaper to show on this device.
+              type: string
+            demo-mode:
+              type: object
+              description: Properties related to the ChromeOS Demo Mode, defining the user
+                experience when the device is used in retail.
+              additionalProperties: false
+              properties:
+                highlights-extension-id:
+                  description: The Chrome extension ID of the highlights app used during demo mode.
+                  type: string
+                screensaver-extension-id:
+                  description: The Chrome extension ID of the attract loop played during demo mode.
+                  type: string
+            regulatory-label:
+              description: Base name of the directory containing the regulatory label
+                files to show on this device.
+              type: string
+            ui:
+              type: object
+              properties:
+                power-button:
+                  type: object
+                  properties:
+                    edge:
+                      type: string
+                      enum:
+                      - left
+                      - right
+                      - top
+                      - bottom
+                    position:
+                      type: string
+                  additionalProperties: false
+                side-volume-button:
+                  description: Defines the position of the side volume button. `region` indicates
+                    whether the button is at the side of the "screen" or "keyboard" of the device.
+                    `side` indicates which edge the button is anchored to while the device in
+                    landscape primary screen orientation. It can be "left", "right", "top",
+                    "bottom".
+                  type: object
+                  properties:
+                    region:
+                      type: string
+                      enum:
+                      - keyboard
+                      - screen
+                    side:
+                      type: string
+                      enum:
+                      - left
+                      - right
+                      - top
+                      - bottom
+                  additionalProperties: false
+                extra-ash-flags:
+                  type: array
+                  build-only-element: true
+                  items:
+                    type: string
+                    pattern: "^--[a-zA-Z][a-zA-Z-]*(=.+)?$"
+                    description: Switches passed to the Ash window manager and
+                      system UI. Each entry should be a string of the form
+                      --<key>=<value>, or --<key> for boolean switches. If this
+                      property is not set, flags will be determined by other
+                      cros_config properties. Serialized to a null byte
+                      separated string when written to configfs.img
+                handwriting-recognition-web-platform-api:
+                  description: Whether the handwriting recognition web platform API
+                    is supported.
+                  type: boolean
+                help-content-id:
+                  description: Identifier passed to the Showoff app to identify
+                    any device-specific help content to be displayed.
+                  type: string
+                apps:
+                  type: object
+                  properties:
+                    extra-web-apps-dir:
+                      type: string
+                      build-only-element: true
+                      description: Subdirectory of external web apps directory
+                        (/usr/share/google-chrome/extensions/web_apps) containing
+                        additional apps which should be installed on the device.
+                      additionalProperties: false
+              additionalProperties: false
+            auto-night-light:
+              description: Whether the auto-night-light feature is enabled on the device, which
+                sets the schedule for Night light automatically to sunset-to-sunrise.
+              type: boolean
+            oem-id:
+              description: |
+                Some projects store SKU ID, OEM ID and Board Revision in an
+                EEPROM and only SKU ID can be updated in the factory and RMA
+                flow but others should be pre-flashed in the chip level. In
+                this case, we would like to validate whether oem-id here from
+                the updated SKU ID matches the one in the EEPROM so we can
+                prevent this device from being updated to another OEM's devices.
+              type: string
+              pattern: "[0-9]+"
+            modem:
+              type: object
+              properties:
+                firmware-variant:
+                  description: Variant of the modem firmware to be used. This
+                    value is read by modemfwd to match against the variant field
+                    of a firmware entry in a firmware manifest. In most cases,
+                    we simply use the model name as the value.
+                  type: string
+                wedge-reboot-delay-ms:
+                  description: Delay in milliseconds after which we pulse the
+                    modem reset GPIO if it hasn't appeared on the USB bus.
+                    This value is used by modemfwd and defaults to 5 minutes
+                    if not defined.
+                  type: string
+                  pattern: "[0-9]+"
+                attach-apn-required:
+                  description: Try to explicitly setup an attach APN when
+                    registering to the LTE network.
+                  type: boolean
+              additionalProperties: false
+            cross-device:
+              type: object
+              description: Contains properties to configure cross-device features
+                between ChromeOS devices and other devices, such as Instant
+                Tethering and Smart Lock.
+              properties:
+                instant-tethering:
+                  type: object
+                  description: Contains properties to configure the Instant Tethering
+                    cross-device feature.
+                  properties:
+                    disable-instant-tethering:
+                      description: Disables the Instant Tethering feature.
+                        false by default
+                      type: boolean
+                  additionalProperties: false
+              additionalProperties: false
+            hardware-properties:
+              type: object
+              description: Contains boolean flags or enums for hardware properties
+                of this board, for example if it's convertible, has a touchscreen,
+                has a camera, etc. This information is used to auto-generate C
+                code that is consumed by the EC build process in order to do
+                run-time configuration. If a value is defined within a config
+                file, but not for a specific model, that value will be assumed
+                to be false for that model. If a value is an enum and is not
+                specified for a specific model, it will default to "none".
+                All properties must be booleans or enums. If non-boolean
+                properties are desired, the generation code in
+                cros_config_schema.py must be updated to support them.
+              properties:
+                is-lid-convertible:
+                  description: Can the lid be rotated 360 degrees.
+                  type: boolean
+                has-lid-accelerometer:
+                  description: Is there an accelerometer in the lid of the
+                    device.
+                  type: boolean
+                has-base-accelerometer:
+                  description: Is there an accelerometer in the base of the
+                    device.
+                  type: boolean
+                has-lid-gyroscope:
+                  description: Is there a gyroscope in the lid of the device.
+                  type: boolean
+                has-base-gyroscope:
+                  description: Is there a gyroscope in the base of the device.
+                  type: boolean
+                has-lid-magnetometer:
+                  description: Is there a magnetometer in the lid of the device.
+                  type: boolean
+                has-base-magnetometer:
+                  description: Is there a magnetometer in the base of the device.
+                  type: boolean
+                has-base-light-sensor:
+                  description: Is there a light sensor in the base of the device.
+                  type: boolean
+                has-lid-light-sensor:
+                  description: Is there a light sensor in the lid of the device.
+                  type: boolean
+                has-touchscreen:
+                  description: Does the device have a touchscreen.
+                  type: boolean
+                has-backlight:
+                  description: Does the device have a backlight.
+                  type: boolean
+                display-type: *display-type
+                stylus-category: *stylus-category
+                psu-type: *psu-type
+                form-factor: *form-factor
+              additionalProperties: false
+            cros-healthd:
+              type: object
+              description: Contains properties used by cros_healthd for
+                model-specific telemetry. Each property represents a category of
+                information and contains boolean properties that indicate
+                whether a device supports a particular telemetry item. See
+                cros_healthd_probe.mojom for descriptions of each property.
+              properties:
+                battery:
+                  type: object
+                  properties:
+                    has-smart-battery-info:
+                      type: boolean
+                  additionalProperties: false
+                cached-vpd:
+                  type: object
+                  properties:
+                    has-sku-number:
+                      type: boolean
+                  additionalProperties: false
+              additionalProperties: false
+            scheduler-tune:
+              type: object
+              description: ChromeOS scheduler's tunable values.
+              properties:
+                boost-urgent:
+                  type: integer
+                  description: (Optional) Scheduler's boost value(%) for urgent
+                    tasks. When an urgent thread is created, chrome applies
+                    this value to scheduler attribute. Tasks with higher
+                    boost value are more likely to have higher operating
+                    power point even when the system is low utilized.
+                  minimum: 0
+                  maximum: 100
+                input-boost:
+                  type: integer
+                  description: (Optional) chromium kernel has a cpu-boost
+                    feature, which boosts CPUs for a short duration when
+                    user intraction is detected from input devices.
+                    This value specifies how much CPUs will be boosted.
+                  minimum: 0
+                  maximum: 100
+                cpuset-nonurgent:
+                  type: string
+                  pattern: "^[0-9]+(-[0-9]+|(,[0-9]+)+)$"
+                  description: (Optional) non-urgent task are only allowed
+                    to use given CPUs.
+              additionalProperties: false
+          additionalProperties: false
+          required:
+          - name
+    additionalProperties: false
+    required:
+    - configs

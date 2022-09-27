@@ -1,0 +1,101 @@
+# Copyright 2019 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//common-mk/pkg_config.gni")
+
+group("all") {
+  deps = [
+    ":sealed_storage",
+    ":sealed_storage_tool",
+    ":sealed_storage_wrapper",
+  ]
+  if (use.test) {
+    deps += [ ":sealed_storage_testrunner" ]
+  }
+}
+
+config("target_defaults") {
+}
+
+pkg_config("cli_defaults") {
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+  ]
+}
+
+pkg_config("test_defaults") {
+  pkg_deps = [
+    "libbrillo-test",
+    "libchrome-test",
+    "libtpm_manager-client",
+    "libtpm_manager-client-test",
+  ]
+}
+
+pkg_config("sealed_storage_dependent_config") {
+  # NOSORT
+  pkg_deps = [
+    "libbrillo",
+    "libchrome",
+    "openssl",
+
+    # per tpm_manager/BUILD.gn, system_api should go before protobuf
+    "system_api",
+    "protobuf",
+  ]
+}
+
+static_library("sealed_storage") {
+  sources = [
+    "sealed_storage.cc",
+    "wrapper.cc",
+  ]
+  configs += [
+    ":target_defaults",
+    "//common-mk:nouse_thin_archive",
+    "//common-mk:pic",
+  ]
+  configs -= [
+    "//common-mk:pie",
+    "//common-mk:use_thin_archive",
+  ]
+  libs = [
+    "trunks",
+    "tpm_manager",
+  ]
+  all_dependent_configs = [ ":sealed_storage_dependent_config" ]
+}
+
+shared_library("sealed_storage_wrapper") {
+  deps = [ ":sealed_storage" ]
+}
+
+executable("sealed_storage_tool") {
+  sources = [ "sealed_storage_tool.cc" ]
+  configs += [
+    ":cli_defaults",
+    ":target_defaults",
+  ]
+  deps = [ ":sealed_storage" ]
+}
+
+if (use.test) {
+  executable("sealed_storage_testrunner") {
+    sources = [
+      "sealed_storage_testrunner.cc",
+      "sealed_storage_unittests.cc",
+    ]
+    configs += [
+      "//common-mk:test",
+      ":target_defaults",
+      ":test_defaults",
+    ]
+    libs = [ "trunks_test" ]
+    deps = [
+      ":sealed_storage",
+      "//common-mk/testrunner",
+    ]
+  }
+}
